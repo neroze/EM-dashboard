@@ -1,0 +1,16 @@
+{
+  "name": "leave-radar",
+  "title": "Leave Radar",
+  "size": "1280x820",
+  "id": "com.example.leave-radar",
+  "version": "0.1.0",
+  "minTinyjsVersion": "0.57.0",
+  "backend": "backend/main.ts",
+  "frontend": {
+    "build": "npm run build",
+    "dist": "dist",
+    "dev": "npm run dev",
+    "devUrl": "http://127.0.0.1:5173"
+  },
+  "contextMenu": false
+}

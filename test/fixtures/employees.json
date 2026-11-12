@@ -1,0 +1,91 @@
+{
+  "title": "Leave Radar",
+  "fields": [],
+  "employees": [
+    {
+      "id": "100",
+      "displayName": "Manager Zero",
+      "location": "London",
+      "supervisorEId": ""
+    },
+    {
+      "id": "101",
+      "displayName": "Person A",
+      "location": "London",
+      "supervisorEId": "100"
+    },
+    {
+      "id": "102",
+      "displayName": "Person B",
+      "location": "Kathmandu",
+      "supervisorEId": "100"
+    },
+    {
+      "id": "103",
+      "firstName": "Person",
+      "lastName": "C",
+      "location": "Kathmandu",
+      "supervisorEId": "101"
+    },
+    {
+      "id": "104",
+      "displayName": "Person D",
+      "location": "",
+      "supervisorId": "103"
+    },
+    {
+      "id": "200",
+      "displayName": "Outsider E",
+      "location": "London",
+      "supervisorEId": "999"
+    },
+    {
+      "id": "201",
+      "displayName": "Loop F",
+      "supervisorEId": "202"
+    },
+    {
+      "id": "202",
+      "displayName": "Loop G",
+      "supervisorEId": "201"
+    },
+    {
+      "id": "105",
+      "displayName": "Leaver H",
+      "location": "London",
+      "supervisorEId": "100",
+      "status": "Inactive",
+      "terminationDate": "2025-06-30"
+    },
+    {
+      "id": "106",
+      "displayName": "Notice I",
+      "location": "London",
+      "supervisorEId": "100",
+      "status": "Active",
+      "terminationDate": "2099-12-31"
+    },
+    {
+      "id": "107",
+      "displayName": "Gone J",
+      "location": "London",
+      "supervisorEId": "100",
+      "status": "Active",
+      "terminationDate": "2020-01-31"
+    },
+    {
+      "id": "108",
+      "displayName": "Lead Left K",
+      "location": "London",
+      "supervisorEId": "100",
+      "status": "Inactive"
+    },
+    {
+      "id": "109",
+      "displayName": "Orphan L",
+      "location": "London",
+      "supervisorEId": "108",
+      "status": "Active"
+    }
+  ]
+}

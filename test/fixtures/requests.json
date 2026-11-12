@@ -1,0 +1,15 @@
+[
+  { "id": "1", "employeeId": "101", "status": { "lastChanged": "2026-11-01", "status": "approved" }, "name": "Person A",
+    "start": "2026-11-13", "end": "2026-11-17", "created": "2026-11-01", "type": { "id": "78", "name": "Vacation" },
+    "amount": { "unit": "hours", "amount": "24" },
+    "dates": { "2026-11-13": "8", "2026-11-14": "0", "2026-11-15": "0", "2026-11-16": "8", "2026-11-17": "8" },
+    "notes": { "employee": "should never be stored" } },
+  { "id": "2", "employeeId": "102", "status": { "status": "requested" }, "start": "2026-11-16", "end": "2026-11-16",
+    "created": "2026-11-10", "type": { "id": "79", "name": "Sick" }, "amount": { "unit": "days", "amount": "0.5" } },
+  { "id": "3", "employeeId": "103", "status": { "status": "denied" }, "start": "2026-11-20", "end": "2026-11-23",
+    "created": "2026-11-05", "type": { "id": "78", "name": "Vacation" }, "amount": { "unit": "days", "amount": "2" } },
+  { "id": "4", "employeeId": "104", "status": "superceded", "start": "2026-12-24", "end": "2026-12-28",
+    "type": { "id": "78", "name": "Vacation" }, "amount": { "unit": "days", "amount": "3" } },
+  { "id": "5", "employeeId": "101", "status": { "status": "approved" }, "start": "bad-date", "end": "2026-12-01" },
+  { "employeeId": "101", "start": "2026-12-01", "end": "2026-12-01" }
+]

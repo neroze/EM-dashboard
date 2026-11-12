@@ -1,0 +1,12 @@
+{
+  "source": "Sprint Mapping - Webx (Confluence). Both boards share dates; update each quarter.",
+  "sprints": [
+    { "name": "Q4 2026 Sprint 1", "start": "2026-10-02", "end": "2026-10-15", "boards": { "SOC Workflow": 8565, "Data Platform": 8572 } },
+    { "name": "Q4 2026 Sprint 2", "start": "2026-10-16", "end": "2026-10-29", "boards": { "SOC Workflow": 8566, "Data Platform": 8573 } },
+    { "name": "Q4 2026 Sprint 3", "start": "2026-10-30", "end": "2026-11-12", "boards": { "SOC Workflow": 8567, "Data Platform": 8574 } },
+    { "name": "Q4 2026 Sprint 4", "start": "2026-11-13", "end": "2026-11-26", "boards": { "SOC Workflow": 8568, "Data Platform": 8575 } },
+    { "name": "Q4 2026 Sprint 5", "start": "2026-11-27", "end": "2026-12-10", "boards": { "SOC Workflow": 8569, "Data Platform": 8576 } },
+    { "name": "Q4 2026 Sprint 6", "start": "2026-12-11", "end": "2026-12-24", "boards": { "SOC Workflow": 8570, "Data Platform": 8577 } },
+    { "name": "Q4 2026 Sprint 7", "start": "2026-12-25", "end": "2027-01-07", "boards": { "SOC Workflow": 8571, "Data Platform": 8578 } }
+  ]
+}

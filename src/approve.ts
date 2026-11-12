@@ -1,0 +1,32 @@
+// Approve a draft (requested) leave request in BambooHR — the app's only
+// write. Always asks first; the result shows as a toast (App listens for the
+// event). On success the backend updates its cache and pushes data-changed,
+// so every view refreshes on its own.
+import { api } from './api.ts';
+import { fmtDays, fmtRange } from './format.ts';
+
+export const TOAST_EVENT = 'leave-radar:toast';
+export const toast = (text: string) => window.dispatchEvent(new CustomEvent(TOAST_EVENT, { detail: text }));
+
+const pending = new Set<string>();
+
+export async function approveLeave(r: { id: string; person: string; typeName: string; startDate: string; endDate: string; days?: number }): Promise<boolean> {
+  if (pending.has(r.id)) return false;
+  const what = `${r.typeName}, ${fmtRange(r.startDate, r.endDate)}${r.days ? ` (${fmtDays(r.days)})` : ''}`;
+  const ok = await tiny.dialog.confirm(`Approve ${r.person}’s leave?`, {
+    detail: `${what}\n\nThis approves the request in BambooHR — ${r.person} and anyone notified by BambooHR will see it.`,
+    ok: 'Approve', cancel: 'Cancel',
+  });
+  if (!ok) return false;
+  pending.add(r.id);
+  try {
+    await api.approveRequest(r.id);
+    toast(`Approved ${r.person}’s ${r.typeName.toLowerCase()} (${fmtRange(r.startDate, r.endDate)})`);
+    return true;
+  } catch (e: any) {
+    toast('Not approved: ' + String(e?.message ?? e).replace(/^Error:\s*/, ''));
+    return false;
+  } finally {
+    pending.delete(r.id);
+  }
+}

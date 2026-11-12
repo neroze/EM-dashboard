@@ -1,0 +1,5 @@
+[
+  { "id": 1, "type": "holiday", "name": "Holiday One", "start": "2026-12-25", "end": "2026-12-26" },
+  { "id": 2, "type": "timeOff", "employeeId": 101, "name": "Person A", "start": "2026-11-13", "end": "2026-11-17" },
+  { "id": 3, "type": "holiday", "name": "Holiday Two", "start": "2027-01-01" }
+]

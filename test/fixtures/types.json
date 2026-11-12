@@ -1,0 +1,1 @@
+{ "timeOffTypes": [ { "id": "78", "name": "Vacation", "units": "hours" }, { "id": "79", "name": "Sick", "units": "days" }, { "id": "80" } ], "defaultHours": [] }
