@@ -1,9 +1,10 @@
 // Multi-select dropdown with optional search. Empty selection = "All".
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
-export interface Option { value: string; label: string; hint?: string }
+/** group: options sharing it are listed under one heading (pass them in group order) */
+export interface Option { value: string; label: string; hint?: string; group?: string }
 
-export function MultiSelect({ label, options, value, onChange, search = false, width = 220, inline = false }: {
+export function MultiSelect({ label, options, value, onChange, search = false, width = 220, inline = false, groupLabel }: {
   label: string;
   options: Option[];
   value: string[];
@@ -12,6 +13,8 @@ export function MultiSelect({ label, options, value, onChange, search = false, w
   width?: number;
   /** expand in place (sidebars: a floating popover would be clipped by the scroller) */
   inline?: boolean;
+  /** how a group heading renders (default: its name) */
+  groupLabel?: (group: string) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
@@ -54,12 +57,27 @@ export function MultiSelect({ label, options, value, onChange, search = false, w
             )}
           </div>
           <div className="ms-list">
-            {shown.map((o) => (
-              <label key={o.value} className="ms-item">
+            {shown.map((o, i) => (
+              <div key={o.value}>
+              {o.group !== undefined && o.group !== shown[i - 1]?.group && (
+                <div className="ms-group">
+                  {groupLabel ? groupLabel(o.group) : o.group}
+                  <button type="button" className="link small" title={`Select everyone in ${o.group}`}
+                    onClick={() => {
+                      const ids = shown.filter((x) => x.group === o.group).map((x) => x.value);
+                      const all = ids.every((id) => selected.has(id));
+                      onChange(all ? value.filter((v) => !ids.includes(v)) : [...new Set([...value, ...ids])]);
+                    }}>
+                    {shown.filter((x) => x.group === o.group).every((x) => selected.has(x.value)) ? 'clear' : 'all'}
+                  </button>
+                </div>
+              )}
+              <label className="ms-item">
                 <input type="checkbox" checked={selected.has(o.value)} onChange={() => toggle(o.value)} />
                 <span>{o.label}</span>
                 {o.hint && <span className="muted small">{o.hint}</span>}
               </label>
+              </div>
             ))}
             {!shown.length && <div className="muted small pad">No matches</div>}
           </div>

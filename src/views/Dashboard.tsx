@@ -9,11 +9,16 @@ import { openInBamboo } from '../bamboo-link.ts';
 import { approveLeave } from '../approve.ts';
 import { fmtAgo, fmtDay, fmtDays, fmtMonth, fmtRange, fmtShort, STATUS_LABEL } from '../format.ts';
 import { Sortable } from '../components/Sortable.tsx';
-import { resetLayouts } from '../state/layout.ts';
+import { autoLayout, resetLayouts } from '../state/layout.ts';
 import { YearSection } from './YearSummary.tsx';
 import type { UiFilters, AppStatus, DailyPoint, Dashboard, DashItem, DashPeriod, DashSection, Ranked, SameDay, SprintLeave } from '../types.ts';
+import { PersonTeam } from '../components/TeamColor.tsx';
+import { ListModeSwitch, PeopleFlow, TeamFlow, type FlowBlock, type FlowPerson } from '../components/PeopleFlow.tsx';
+import { useListMode } from '../state/listMode.ts';
 
 const monthLong = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+const wdShort = new Intl.DateTimeFormat(undefined, { weekday: 'short', timeZone: 'UTC' });
+const fmtWeekdayShort = (d: string) => wdShort.format(new Date(d + 'T00:00:00Z'));
 const SLOTS = 8; // categorical slots in index.css (--c1..--c8); past that, "other" grey
 const TypeColors = createContext<(type: string) => string>(() => 'var(--c-other)');
 const useColor = () => useContext(TypeColors);
@@ -39,6 +44,11 @@ export function DashboardView({ data, typeOrder, onRefresh, syncing, lastSyncAt,
     <TypeColors.Provider value={color}>
       <div className="dash-wrap">
         <div className="dash-bar">
+          <button type="button" className="auto-layout" onClick={autoLayout}
+            title="Arrange every widget for this window: time order (today → week → month → …), charts wide, rows filled edge to edge">
+            <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><rect x="1.5" y="1.5" width="6" height="5" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.4" /><rect x="9" y="1.5" width="5.5" height="8" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.4" /><rect x="1.5" y="8.5" width="6" height="6" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.4" /><rect x="9" y="11.5" width="5.5" height="3" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>
+            Auto layout
+          </button>
           <button type="button" className="link small" onClick={resetLayouts} title="Put every section and widget back in its default order">Reset layout</button>
           <span className="muted small">{syncing ? 'Fetching the latest from BambooHR…' : `Data from ${fmtAgo(lastSyncAt)}`}</span>
           <button type="button" className={'refresh' + (syncing ? ' spinning' : '')} onClick={onRefresh} disabled={syncing}
@@ -72,7 +82,7 @@ function Section({ title, kind, s, d, note }: { title: string; kind: 'leave' | '
         <h2>{title} <span className="h2-sep">·</span> <span className="month-cur h2-month">{monthLong.format(new Date(d.month.from + 'T00:00:00Z'))}</span></h2>
         {note && <span className="muted small">{note}</span>}
       </div>
-      <Sortable id={'dash.' + kind} className="dash-grid" items={[
+      <Sortable grid minCol={280} id={'dash.' + kind} className="dash-grid" items={[
         { key: 'today', node: <PeriodWidget title={`${k} today`} range={fmtDay(d.today)} p={s.today} statuses={['planned', 'draft', 'denied']} /> },
         { key: 'nextWeek', node: <PeriodWidget title={`${k} next week`} range={fmtRange(d.nextWeek.from, d.nextWeek.to)} p={s.nextWeek} statuses={['planned', 'draft']} /> },
         { key: 'month', node: <PeriodWidget title={`${k} this month`} range={month} p={s.month} statuses={['planned', 'draft']} /> },
@@ -83,9 +93,11 @@ function Section({ title, kind, s, d, note }: { title: string; kind: 'leave' | '
   );
 }
 
-function Widget({ title, range, count, unit, children, extra, className, badge }: {
+function Widget({ title, range, count, unit, children, extra, className, badge, tools }: {
   title: string; range: string; count: number; unit: string; children: React.ReactNode; extra?: React.ReactNode;
   className?: string; badge?: React.ReactNode;
+  /** controls above the list, e.g. the Compact / List switch */
+  tools?: React.ReactNode;
 }) {
   return (
     <div className={'widget' + (className ? ' ' + className : '')}>
@@ -95,6 +107,7 @@ function Widget({ title, range, count, unit, children, extra, className, badge }
       </div>
       <div className="w-count">{count}<small> {unit}</small></div>
       {extra}
+      {tools && <div className="w-tools">{tools}</div>}
       <div className="w-list">{children}</div>
     </div>
   );
@@ -158,10 +171,12 @@ function groupByType(items: DashItem[]) {
 function PeriodWidget({ title, range, p, statuses }: { title: string; range: string; p: DashPeriod; statuses: AppStatus[] }) {
   const color = useColor();
   const [only, setOnly] = useState<AppStatus | null>(null);
+  const [mode, setMode] = useListMode('period:' + title);
   const items = only ? p.items.filter((i) => i.status === only) : p.items;
-  const groups = groupByType(items);
+  const groups = groupByType(items); // type split bar
   return (
     <Widget title={title} range={range} count={p.items.length} unit={p.items.length === 1 ? 'request' : 'requests'}
+      tools={items.length ? <ListModeSwitch mode={mode} onChange={setMode} /> : undefined}
       extra={(
         <>
           <div className="w-pills">
@@ -176,27 +191,16 @@ function PeriodWidget({ title, range, p, statuses }: { title: string; range: str
           <TypeSplit parts={groups.map(([t, l]) => [t, l.length])} unit={(n) => `${n} request${n === 1 ? '' : 's'}`} />
         </>
       )}>
-      {groups.map(([type, list]) => (
-        <div key={type} className="grp">
-          <div className="grp-h" style={{ '--tc': color(type) } as React.CSSProperties}>
-            <i />{type}<span className="grp-n">{list.length}</span>
-          </div>
-          {list.map((i) => (
-            <div key={i.id} className="w-row">
-              <span className={'dot ' + i.status} title={STATUS_LABEL[i.status]} />
-              <span className="w-name">{i.person}<span className="muted small"> · {i.team}</span></span>
-              <span className="muted small nowrap">
-                {fmtShort(i.startDate)}{i.endDate !== i.startDate ? `–${fmtShort(i.endDate)}` : ''} · {fmtDays(i.days)}
-              </span>
-              {i.status === 'draft' && (
-                <button type="button" className="approve icon" title="Approve in BambooHR" aria-label={`Approve ${i.person}’s leave`}
-                  onClick={() => approveLeave(i)}>✓</button>
-              )}
-              {i.url && <button type="button" className="link small" title="Open in BambooHR" onClick={() => openInBamboo(i.url!)}>↗</button>}
-            </div>
-          ))}
-        </div>
-      ))}
+      <TeamFlow counts rows={mode === 'rows'} people={items.map((i) => ({
+        key: i.id, name: i.person, team: i.team, status: i.status, suffix: fmtDays(i.days).replace(' days', 'd').replace(' day', 'd'),
+        title: `${i.person} · ${i.team}\n${i.typeName} · ${fmtRange(i.startDate, i.endDate)} · ${fmtDays(i.days)}\n${STATUS_LABEL[i.status]}`,
+        detail: <><span className="sd-type"><i className="type-sq" style={{ '--tc': color(i.typeName) } as React.CSSProperties} />{i.typeName}</span>
+          <span className="sd-when">{fmtShort(i.startDate)}{i.endDate !== i.startDate ? `–${fmtShort(i.endDate)}` : ''}</span></>,
+        actions: <>
+          {i.status === 'draft' && <button type="button" className="approve icon" title="Approve in BambooHR" aria-label={`Approve ${i.person}’s leave`} onClick={() => approveLeave(i)}>✓</button>}
+          {i.url && <button type="button" className="link small" title="Open in BambooHR" onClick={() => openInBamboo(i.url!)}>↗</button>}
+        </>,
+      }))} />
       {!items.length && <div className="w-empty">Nobody.</div>}
     </Widget>
   );
@@ -204,27 +208,28 @@ function PeriodWidget({ title, range, p, statuses }: { title: string; range: str
 
 function SameDayWidget({ title, range, days, daily, today }: { title: string; range: string; days: SameDay[]; daily: DailyPoint[]; today: string }) {
   const people = new Set(days.flatMap((d) => d.people.map((p) => p.employeeId))).size;
+  const [mode, setMode] = useListMode('sameday:' + title);
+  // upcoming days first (today onwards), then the rest of the month
+  const sorted = [...days.filter((d) => d.day >= today), ...days.filter((d) => d.day < today)];
+  const blocks: FlowBlock[] = sorted.map((d) => ({
+    key: d.day, label: fmtShort(d.day), sub: `${fmtWeekdayShort(d.day)} · ${d.people.length}`,
+    current: d.day === today, past: d.day < today,
+    people: d.people.map((p) => ({
+      key: p.employeeId, name: p.person, team: p.team, status: p.status, suffix: p.fraction < 1 ? '½' : undefined,
+      title: `${p.person} · ${p.team} · ${STATUS_LABEL[p.status]}${p.fraction < 1 ? ' · half day' : ''}`,
+    })),
+  }));
   return (
     <Widget title={title} range={range} count={days.length} unit={days.length === 1 ? 'day' : 'days'}
+      tools={days.length ? <ListModeSwitch mode={mode} onChange={setMode} /> : undefined}
       extra={(
         <>
           <div className="w-pills"><span className="muted small">days with 2+ people away · {people} {people === 1 ? 'person' : 'people'} involved</span></div>
           <DailyColumns daily={daily} today={today} />
         </>
       )}>
-      {days.map((d) => (
-        <div key={d.day} className="w-day">
-          <div className="w-day-h"><b>{fmtDay(d.day)}</b> <span className="muted small">{d.people.length} people</span></div>
-          <div className="w-day-p">
-            {d.people.map((p) => (
-              <span key={p.employeeId} className={'tag-p ' + p.status} title={`${p.team} · ${STATUS_LABEL[p.status]}${p.fraction < 1 ? ' · half day' : ''}`}>
-                {p.person}{p.fraction < 1 ? ' ½' : ''}
-              </span>
-            ))}
-          </div>
-        </div>
-      ))}
-      {!days.length && <div className="w-empty">No days with two or more people away.</div>}
+      <PeopleFlow blocks={blocks} rows={mode === 'rows'} empty={<div className="w-empty">No days with two or more people away.</div>} />
+
     </Widget>
   );
 }
@@ -232,7 +237,7 @@ function SameDayWidget({ title, range, days, daily, today }: { title: string; ra
 const PIE_SLICES = 7; // top people get a slot each; the rest fold into "Others"
 
 /** share of the month's days by person: a pie, slices separated by a surface gap */
-function Pie({ slices, size = 132 }: { slices: { key: string; label: string; value: number; color: string }[]; size?: number }) {
+function Pie({ slices, size = 132 }: { slices: { key: string; label: string; value: number; color: string; team?: string }[]; size?: number }) {
   const total = slices.reduce((a, x) => a + x.value, 0);
   if (!total) return null;
   const r = size / 2, c = r;
@@ -251,7 +256,7 @@ function Pie({ slices, size = 132 }: { slices: { key: string; label: string; val
           const d = `M${c},${c} L${c + r * Math.cos(a0)},${c + r * Math.sin(a0)} A${r},${r} 0 ${large} 1 ${c + r * Math.cos(a1)},${c + r * Math.sin(a1)} Z`;
           return (
             <path key={x.key} d={d} fill={x.color} className="pie-slice">
-              <title>{x.label}: {fmtDays(x.value)} ({Math.round((x.value / total) * 100)}%)</title>
+              <title>{x.label}{x.team ? ` · ${x.team}` : ''}: {fmtDays(x.value)} ({Math.round((x.value / total) * 100)}%)</title>
             </path>
           );
         })}
@@ -265,32 +270,42 @@ function RankWidget({ title, range, rows }: { title: string; range: string; rows
   const rest = rows.slice(PIE_SLICES);
   const restDays = rest.reduce((a, r) => a + r.days, 0);
   const swatch = (i: number) => (i < PIE_SLICES ? `var(--c${i + 1})` : 'var(--c-other)');
+  const color = useColor();
+  const [mode, setMode] = useListMode('rank:' + title, 'rows');
+  const maxDays = rows[0]?.days ?? 0;
+  const rankOf = new Map(rows.map((r, i) => [r.employeeId, i]));
   const slices = [
-    ...top.map((r, i) => ({ key: r.employeeId, label: r.person, value: r.days, color: swatch(i) })),
-    ...(restDays ? [{ key: 'other', label: `Others (${rest.length})`, value: n2(restDays), color: 'var(--c-other)' }] : []),
+    ...top.map((r, i) => ({ key: r.employeeId, label: r.person, team: r.team, value: r.days, color: swatch(i) })),
+    ...(restDays ? [{ key: 'other', label: `Others (${rest.length})`, team: '', value: n2(restDays), color: 'var(--c-other)' }] : []),
   ];
   return (
     <Widget title={title} range={range} count={rows.length} unit={rows.length === 1 ? 'person' : 'people'}
+      tools={rows.length ? <ListModeSwitch mode={mode} onChange={setMode} rowsLabel="Ranked" /> : undefined}
       extra={rows.length ? (
         <div className="pie-row">
           <Pie slices={slices} />
           <div className="pie-key">
             {slices.map((x) => (
-              <span key={x.key} className="lg"><i style={{ background: x.color }} /><span className="pie-key-n">{x.label}</span>
+              <span key={x.key} className="lg"><i style={{ background: x.color }} />{x.team ? <PersonTeam person={x.label} team={x.team} inline /> : <span className="pie-key-n">{x.label}</span>}
                 <b>{Math.round((x.value / total) * 100)}%</b></span>
             ))}
             <span className="muted small">{fmtDays(n2(total))} in total</span>
           </div>
         </div>
       ) : undefined}>
-      {rows.map((r, i) => (
-        <div key={r.employeeId} className="w-row rank" title={Object.entries(r.byType).map(([t, v]) => `${t}: ${fmtDays(v)}`).join('\n') + (r.draft ? `\n(${fmtDays(r.draft)} still draft)` : '')}>
-          <span className="w-rank">{i + 1}</span>
-          <i className="sw-sq" style={{ background: swatch(i) }} />
-          <span className="w-name">{r.person}<span className="muted small"> · {Object.keys(r.byType).join(', ')}</span></span>
-          <span className="nowrap small w-num">{n2(r.days)} d<span className="muted"> · {r.requests}</span></span>
-        </div>
-      ))}
+      <TeamFlow counts rows={mode === 'rows'} people={rows.map((r) => {
+        const i = rankOf.get(r.employeeId)!;
+        return {
+          meter: maxDays ? r.days / maxDays : 0, meterColor: swatch(i),
+          value: <>{n2(r.days)} d<span className="muted"> · {r.requests} req</span></>,
+          key: r.employeeId, name: r.person, team: r.team, status: r.draft && r.draft >= r.days ? 'draft' : r.draft ? 'mixed' : 'planned',
+          suffix: `${n2(r.days)}d`,
+          lead: <><span className="sd-lead">{i + 1}</span><i className="sw-sq" style={{ background: swatch(i) }} /></>,
+          detail: <>{Object.keys(r.byType).map((t) => <span key={t} className="sd-type"><i className="type-sq" style={{ '--tc': color(t) } as React.CSSProperties} />{t}</span>)}
+            {mode !== 'rows' && <span>{r.requests} {r.requests === 1 ? 'request' : 'requests'}</span>}</>,
+          title: `${r.person} · ${r.team}\n` + Object.entries(r.byType).map(([t, v]) => `${t}: ${fmtDays(v)}`).join('\n') + (r.draft ? `\n(${fmtDays(r.draft)} still draft)` : ''),
+        };
+      })} meta={(_t, list) => <span className="muted small">· {fmtDays(n2(list.reduce((a, p) => a + (rows.find((r) => r.employeeId === p.key)?.days ?? 0), 0)))}</span>} />
       {!rows.length && <div className="w-empty">Nobody this month.</div>}
     </Widget>
   );
@@ -312,7 +327,7 @@ function SprintSection({ sprints }: { sprints: SprintLeave[] }) {
       {!sprints.length
         ? <div className="widget"><div className="w-empty">No sprints configured — add them to sprints.json (Sprint Mapping) to see leave per sprint.</div></div>
         : (
-          <Sortable id="dash.sprint" className="dash-grid" items={[
+          <Sortable grid minCol={280} id="dash.sprint" className="dash-grid" items={[
             { key: 'overview', node: <SprintOverview sprints={sprints} /> },
             // keyed by role, so the order survives the sprint rolling over
             ...sprints.map((sp) => ({ key: sp.role, node: <SprintWidget sp={sp} /> })),
@@ -325,11 +340,13 @@ function SprintSection({ sprints }: { sprints: SprintLeave[] }) {
 /** one row per sprint: total days, bar split by type on a shared scale */
 function SprintOverview({ sprints }: { sprints: SprintLeave[] }) {
   const color = useColor();
+  const [mode, setMode] = useListMode('sprint-overview');
   const max = Math.max(...sprints.map((s) => s.days), 0);
   const types = [...new Set(sprints.flatMap((s) => Object.keys(s.byType)))].sort();
   const total = sprints.reduce((a, s) => a + s.days, 0);
   return (
     <Widget title="Leave per sprint" range={`${sprints.length} sprints`} count={n2(total)} unit="days"
+      tools={sprints.some((s) => s.people.length) ? <ListModeSwitch mode={mode} onChange={setMode} /> : undefined}
       className="sprint-overview"
       extra={types.length > 1 ? (
         <div className="legend-row">{types.map((t) => <span key={t} className="lg"><i style={{ background: color(t) }} />{t}</span>)}</div>
@@ -347,15 +364,7 @@ function SprintOverview({ sprints }: { sprints: SprintLeave[] }) {
           </div>
           <div className="muted small">{fmtRange(sp.startDate, sp.endDate)}{sp.draft ? ` · ${n2(sp.draft)} d draft` : ''}</div>
           {sp.people.length > 0 ? (
-            <div className="sp-people">
-              {sp.people.map((p) => (
-                <span key={p.employeeId} className={'sp-person' + (p.draft && !p.planned ? ' draft' : p.draft ? ' mixed' : '')}
-                  title={`${p.person} · ${p.team}\n${p.types.join(', ')}\n${p.first === p.last ? fmtDay(p.first) : `${fmtDay(p.first)} – ${fmtDay(p.last)}`} · ${fmtDays(p.days)}` +
-                    (p.draft ? `\n${fmtDays(p.draft)} still draft` : '')}>
-                  <i style={{ background: color(p.types[0]) }} />{p.person}<b>{n2(p.days)}d</b>
-                </span>
-              ))}
-            </div>
+            <SprintPeople people={sp.people} rows={mode === 'rows'} />
           ) : <div className="muted small">Nobody on leave.</div>}
         </div>
       ))}
@@ -363,11 +372,32 @@ function SprintOverview({ sprints }: { sprints: SprintLeave[] }) {
   );
 }
 
+/** a sprint's people, a line per team: team pill, then their chips */
+function SprintPeople({ people, rows }: { people: SprintLeave['people']; rows?: boolean }) {
+  const color = useColor();
+  return <TeamFlow rows={rows} people={people.map((p) => sprintPerson(p, color))} />;
+}
+
+/** one sprint person for the team list: dot = approved / draft, type + dates below */
+function sprintPerson(p: SprintLeave['people'][number], color: (t: string) => string): FlowPerson {
+  return {
+    key: p.employeeId, name: p.person, team: p.team, status: p.draft && !p.planned ? 'draft' : p.draft ? 'mixed' : 'planned',
+    suffix: `${n2(p.days)}d`,
+    detail: <>{p.types.map((t) => <span key={t} className="sd-type"><i className="type-sq" style={{ '--tc': color(t) } as React.CSSProperties} />{t}</span>)}
+      <span className="sd-when">{p.first === p.last ? fmtShort(p.first) : `${fmtShort(p.first)}–${fmtShort(p.last)}`}</span></>,
+    title: `${p.person} · ${p.team}\n${p.types.join(', ')}\n${p.first === p.last ? fmtDay(p.first) : `${fmtDay(p.first)} – ${fmtDay(p.last)}`} · ${fmtDays(p.days)}` + (p.draft ? `\n${fmtDays(p.draft)} still draft` : ''),
+    actions: p.requests[0]?.url ? <button type="button" className="link small" title="Open in BambooHR" onClick={() => openInBamboo(p.requests[0].url!)}>↗</button> : undefined,
+  };
+}
+
 /** people on leave in one sprint */
 function SprintWidget({ sp }: { sp: SprintLeave }) {
   const hl = sp.role === 'current' || sp.role === 'next';
+  const color = useColor();
+  const [mode, setMode] = useListMode('sprint-widget');
   return (
     <Widget title={sp.name} badge={<RoleBadge role={sp.role} />} range={fmtRange(sp.startDate, sp.endDate)}
+      tools={sp.people.length ? <ListModeSwitch mode={mode} onChange={setMode} /> : undefined}
       count={sp.people.length} unit={sp.people.length === 1 ? 'person on leave' : 'people on leave'}
       className={'sprint-w ' + sp.role + (hl ? ' hl' : '')}
       extra={(
@@ -380,15 +410,7 @@ function SprintWidget({ sp }: { sp: SprintLeave }) {
           <TypeSplit parts={Object.entries(sp.byType).sort((a, b) => b[1] - a[1])} unit={fmtDays} />
         </>
       )}>
-      {sp.people.map((p) => (
-        <div key={p.employeeId} className="w-row">
-          <span className={'dot ' + (p.draft && !p.planned ? 'draft' : 'planned')} title={p.draft ? `${fmtDays(p.draft)} draft` : 'Approved'} />
-          <span className="w-name">{p.person}<span className="muted small"> · {p.team} · {p.types.join(', ')}</span></span>
-          <span className="muted small nowrap">{p.first === p.last ? fmtShort(p.first) : `${fmtShort(p.first)}–${fmtShort(p.last)}`}</span>
-          <span className="small nowrap w-num">{n2(p.days)} d</span>
-          {p.requests[0]?.url && <button type="button" className="link small" title="Open in BambooHR" onClick={() => openInBamboo(p.requests[0].url!)}>↗</button>}
-        </div>
-      ))}
+      <TeamFlow counts rows={mode === 'rows'} people={sp.people.map((p) => sprintPerson(p, color))} />
       {!sp.people.length && <div className="w-empty">Nobody on leave this sprint.</div>}
     </Widget>
   );

@@ -20,7 +20,12 @@ export interface Status {
   lastError: string | null;
   recordCount: number;
   peopleCount: number;
+  team: Team;
+  teams: Team[];
+  selected: string[]; // teams being viewed (their union)
 }
+
+export interface Team { id: string; name: string; color: string }
 
 export interface SprintInfo { name: string; startDate: string; endDate: string; boards: Record<string, string> }
 
@@ -43,9 +48,14 @@ export interface CalendarData {
   requests: Record<string, LeaveRecord>;
 }
 
+export interface CapOnLeave {
+  employeeId: string; person: string; team: string;
+  planned: number; draft: number; first: string; last: string; types: string[]; url: string;
+}
 export interface CapacityPeriod {
   id: string; name: string; from: string; to: string;
   teams: (TeamCapacity & { overlapDays: number; threshold: number })[];
+  onLeave: CapOnLeave[];
 }
 
 export interface Summary { peopleOutToday: number; draftRequests: number; oldestDraftDays: number; overlapDays: number }

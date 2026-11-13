@@ -120,10 +120,18 @@ const HOLIDAYS = [
   { start: '2027-01-01', end: '2027-01-01', name: "New Year's Day" },
 ];
 
-export function createDemoClient(): BambooClient {
+/** demo "key owner" for one demo team. One demo team sees the whole demo org;
+ *  several demo teams each get their own lead's reporting line (A, B, A, …),
+ *  so selecting / unselecting teams visibly changes who is shown. */
+export function demoRootFor(index: number, demoTeamCount: number): string {
+  if (demoTeamCount <= 1) return DEMO_ME;
+  return index % 2 === 0 ? '9001' : '9002';
+}
+
+export function createDemoClient(root: string = DEMO_ME): BambooClient {
   const respond = async (path: string, query?: Record<string, string>) => {
     await new Promise((r) => setTimeout(r, 150));
-    if (path.startsWith('employees/0')) return { id: DEMO_ME, displayName: 'Demo Manager' };
+    if (path.startsWith('employees/0')) return { id: root, displayName: root === DEMO_ME ? 'Demo Manager' : 'Demo Lead' };
     if (path.startsWith('reports/custom') || path.startsWith('employees/directory')) {
       return { fields: [], employees: [{ id: DEMO_ME, displayName: 'Demo Manager', location: 'London', supervisorEId: '', status: 'Active' },
         ...people().map(({ squad: _s, ...e }) => ({ ...e, status: 'Active' })),

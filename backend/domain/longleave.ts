@@ -2,11 +2,17 @@
 // person's leave days where nothing but weekends / their holidays sits
 // between one leave day and the next — so back-to-back requests join into a
 // single run. Long = 10+ working days, mini = 5–9. Approved and draft (still
-// planned) only; work-from-home types never count as leave. Pure functions.
+// planned) only, and only SCHEDULED leave: work from home, sick leave and
+// substitute leave never count — and a day of them breaks a run. Pure functions.
 import { addDays, addMonths, isWeekend } from './dates.ts';
 import { isActive } from './status.ts';
 import type { AppStatus } from './types.ts';
 import { isWfhType, type DashDay, type DashRecord } from './dashboard.ts';
+
+/** types that are not scheduled time off (besides work from home) */
+export const UNSCHEDULED_RE = /\bsick|substitut/i;
+/** does this leave type count toward long / mini leave? */
+export const countsAsLongLeave = (typeName: string) => !isWfhType(typeName) && !UNSCHEDULED_RE.test(typeName || '');
 
 export const LONG_DAYS = 10;
 export const MINI_DAYS = 5;
@@ -29,7 +35,7 @@ export function findRuns(recs: DashRecord[], days: DashDay[], isHoliday: (day: s
   const perPerson = new Map<string, Map<string, { fraction: number; reqs: Set<string> }>>();
   for (const d of days) {
     const r = byId.get(d.requestId);
-    if (!r || !isActive(r.status) || isWfhType(r.typeName) || d.fraction <= 0) continue;
+    if (!r || !isActive(r.status) || !countsAsLongLeave(r.typeName) || d.fraction <= 0) continue;
     const m = perPerson.get(d.employeeId) ?? new Map();
     const cur = m.get(d.day) ?? { fraction: 0, reqs: new Set<string>() };
     cur.fraction = Math.min(1, cur.fraction + d.fraction);

@@ -5,6 +5,8 @@ import { dayNum, fmtDay, fmtMonth, fmtWeekday, isWeekendDay, pct } from '../form
 import { setState, useUi, type Zoom } from '../state/filters.ts';
 import type { CalendarCell, CalendarData, LeaveRecord, OverlapDay } from '../types.ts';
 import { RequestPopover } from '../components/RequestPopover.tsx';
+import { TeamTag } from '../components/TeamColor.tsx';
+import { useTeamColor } from '../teamColors.ts';
 
 const ROW_H = 30;
 const TEAM_H = 26;
@@ -139,9 +141,12 @@ export function CalendarView({ data, today }: { data: CalendarData | null; today
 function TeamRow({ team, count, days, colW, load }: {
   team: string; count: number; days: string[]; colW: number; load: Map<string, OverlapDay>;
 }) {
+  const color = useTeamColor()(team);
   return (
     <div className="cal-row team" style={{ height: TEAM_H }}>
-      <div className="cal-name team" style={{ width: NAME_W }}>{team} <span className="muted small">· {count}</span></div>
+      <div className="cal-name team" style={{ width: NAME_W, ...(color ? { boxShadow: `inset 3px 0 0 ${color}` } : {}) }}>
+        <TeamTag name={team} plain /> <span className="muted small">· {count}</span>
+      </div>
       {days.map((d) => {
         const t = load.get(d)?.teams.find((x) => x.team === team);
         return (

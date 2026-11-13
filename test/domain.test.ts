@@ -119,6 +119,7 @@ test('capacity: working days − location holidays, planned vs draft separate', 
     { employeeId: 'b', day: '2026-11-18', fraction: 1, status: 'draft' as const },
     { employeeId: 'b', day: '2026-12-01', fraction: 1, status: 'planned' as const }, // outside the sprint
     { employeeId: 'd', day: '2026-11-20', fraction: 1, status: 'denied' as const }, // never counted
+    { employeeId: 'a', day: '2026-11-19', fraction: 1, status: 'planned' as const, wfh: true }, // working: stays available
   ];
   const t = capacityByTeam(people, days, '2026-11-13', '2026-11-26', hol);
   const soc = t.find((x) => x.team === 'SOC Workflow')!;
@@ -127,6 +128,8 @@ test('capacity: working days − location holidays, planned vs draft separate', 
   assert.equal(soc.draftOut, 1.5);
   assert.equal(soc.net, 26.5);
   assert.equal(soc.netPlanned, 28);
+  assert.equal(soc.wfh, 1);
+  assert.equal(soc.people.find((p) => p.id === 'a')!.net, 8.5); // 10 − 1 − 0.5, the WFH day not subtracted
   const dp = t.find((x) => x.team === 'Data Platform')!;
   assert.equal(dp.plannedOut + dp.draftOut, 0);
 });
@@ -312,4 +315,82 @@ test('long / mini leave: runs across weekends, holidays and back-to-back request
   assert.equal(y.mini.length, 3);
   assert.deepEqual(y.months[10].long.map((r) => r.employeeId), ['1']);
   assert.equal(y.months[9].mini.length, 2);
+});
+
+test('long leave never counts work from home, even right next to leave', async () => {
+  const { findRuns } = await import('../backend/domain/longleave.ts');
+  const { eachDay, isWeekend } = await import('../backend/domain/dates.ts');
+  const work = (a: string, b: string) => eachDay(a, b).filter((d) => !isWeekend(d));
+  const rec = (id: string, typeName: string) => ({ id, employeeId: '1', person: 'P', team: 'T', status: 'planned' as any, typeName, startDate: '', endDate: '' });
+  // a leave week, then a WFH week (both spellings): 5 leave days → mini, never long
+  const days = [
+    ...work('2026-11-02', '2026-11-06').map((d) => ({ requestId: 'l', employeeId: '1', day: d, fraction: 1 })),
+    ...work('2026-11-09', '2026-11-11').map((d) => ({ requestId: 'w1', employeeId: '1', day: d, fraction: 1 })),
+    ...work('2026-11-12', '2026-11-13').map((d) => ({ requestId: 'w2', employeeId: '1', day: d, fraction: 1 })),
+  ];
+  const runs = findRuns([rec('l', 'Annual Leave'), rec('w1', 'Work From Home'), rec('w2', 'WFH')], days, () => false);
+  assert.deepEqual(runs.map((r) => [r.kind, r.start, r.end, r.days, r.types]), [['mini', '2026-11-02', '2026-11-06', 5, ['Annual Leave']]]);
+});
+
+test('long leave counts scheduled leave only: sick and substitute leave break a run', async () => {
+  const { findRuns, countsAsLongLeave } = await import('../backend/domain/longleave.ts');
+  const { eachDay, isWeekend } = await import('../backend/domain/dates.ts');
+  const work = (a: string, b: string) => eachDay(a, b).filter((d) => !isWeekend(d));
+  const rec = (id: string, typeName: string) => ({ id, employeeId: '1', person: 'P', team: 'T', status: 'planned' as any, typeName, startDate: '', endDate: '' });
+  for (const t of ['Sick Leave', 'Substitute Leave', 'Work From Home', 'WFH']) assert.equal(countsAsLongLeave(t), false, t);
+  for (const t of ['Annual Leave', 'Vacation', 'Paternity Leave']) assert.equal(countsAsLongLeave(t), true, t);
+  // annual Mon–Fri, sick Mon–Wed, annual Thu–Fri: 5 + 2 → one mini only, no long
+  const days = [
+    ...work('2026-11-02', '2026-11-06').map((d) => ({ requestId: 'a', employeeId: '1', day: d, fraction: 1 })),
+    ...work('2026-11-09', '2026-11-11').map((d) => ({ requestId: 's', employeeId: '1', day: d, fraction: 1 })),
+    ...work('2026-11-12', '2026-11-13').map((d) => ({ requestId: 'b', employeeId: '1', day: d, fraction: 1 })),
+    // two weeks of substitute leave → nothing
+    ...work('2026-12-07', '2026-12-18').map((d) => ({ requestId: 'u', employeeId: '1', day: d, fraction: 1 })),
+  ];
+  const runs = findRuns([rec('a', 'Annual Leave'), rec('s', 'Sick Leave'), rec('b', 'Annual Leave'), rec('u', 'Substitute Leave')], days, () => false);
+  assert.deepEqual(runs.map((r) => [r.kind, r.start, r.end, r.days]), [['mini', '2026-11-02', '2026-11-06', 5]]);
+});
+
+test('demo teams get their own reporting lines', async () => {
+  const { demoRootFor, DEMO_ME } = await import('../backend/bamboo/demo.ts');
+  assert.equal(demoRootFor(0, 1), DEMO_ME); // one demo team: whole demo org
+  assert.equal(demoRootFor(0, 2), '9001');  // two: lead A's and lead B's people
+  assert.equal(demoRootFor(1, 2), '9002');
+});
+
+test('auto layout: charts wide, tall widgets wider, rows filled', async () => {
+  const { autoSpans } = await import('../src/state/layout.ts');
+  const w = (want: number, h: number) => ({ want, h });
+  // 4 columns: today/week/month/same-day/person (person is very tall), chart wants 2
+  assert.deepEqual(autoSpans([w(1, 200), w(1, 220), w(1, 210), w(1, 230), w(1, 600)], 4), [1, 1, 1, 1, 4]);
+  // 3 columns: the tall one widens to 2, rows end flush
+  assert.deepEqual(autoSpans([w(1, 200), w(1, 600), w(1, 210), w(1, 220)], 3), [1, 2, 1, 2]); // spare column → the row's tallest
+  // a chart (wants 2) never exceeds the columns that fit
+  assert.deepEqual(autoSpans([w(2, 300), w(1, 200)], 1), [1, 1]);
+  // every row sums to the column count
+  const s = autoSpans([w(1, 100), w(2, 300), w(1, 150), w(1, 160), w(1, 170)], 3);
+  let row = 0; for (const x of s) { row += x; if (row > 3) assert.fail('row overflow'); if (row === 3) row = 0; }
+  assert.equal(row, 0);
+});
+
+test('auto layout keeps widths the user set and packs around them', async () => {
+  const { autoPlan } = await import('../src/state/layout.ts');
+  const it = (key: string, want: number, h: number, fixed = false) => ({ key, want, h, fixed });
+  // 4 columns; user made "today" 3 wide. Week (1) fits beside it; month+same day+person follow.
+  let p = autoPlan([it('today', 3, 200, true), it('week', 1, 200), it('month', 1, 210), it('same', 1, 220), it('person', 1, 250)], 4);
+  assert.equal(p.spans.today, 3);                       // untouched
+  assert.deepEqual(p.order, ['today', 'week', 'month', 'same', 'person']);
+  assert.equal(p.spans.month + p.spans.same + p.spans.person, 4); // second row flush, spare to the tallest free one
+  assert.equal(p.spans.person, 2);
+  // user made "week" 2 wide in 3 columns: today(1)+week(2) fill row 1; nothing of theirs changes
+  p = autoPlan([it('today', 1, 200), it('week', 2, 200, true), it('month', 1, 300), it('same', 1, 200)], 3);
+  assert.equal(p.spans.week, 2);
+  assert.deepEqual(p.order.slice(0, 2), ['today', 'week']);
+  // a row the user filled with fixed widths that don't fit: a later narrow item is pulled forward
+  p = autoPlan([it('a', 2, 200, true), it('b', 2, 200, true), it('c', 1, 200), it('d', 1, 200)], 3);
+  assert.deepEqual(p.order.slice(0, 2), ['a', 'c']);     // c fills the gap after a; b starts the next row
+  assert.equal(p.spans.a, 2); assert.equal(p.spans.b, 2);
+  // a user width wider than the window is capped for layout, but kept
+  p = autoPlan([it('a', 4, 200, true), it('b', 1, 200)], 2);
+  assert.equal(p.spans.a, 2);
 });

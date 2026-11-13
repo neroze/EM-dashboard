@@ -3,17 +3,20 @@
 //  available  = working days in the period − holidays for the person's location
 //  plannedOut = Σ leave_day.fraction of approved requests in the period
 //  draftOut   = Σ leave_day.fraction of requested (draft) requests
+//  wfh        = work-from-home days — the person is WORKING, so they count as
+//               available; tracked only for information (never "out")
 //  overlap day = out-people ÷ team size ≥ threshold (half day = 0.5 person)
 import { eachDay, isWeekend } from './dates.ts';
 import type { AppStatus } from './types.ts';
 
 export interface CapPerson { id: string; displayName: string; team: string; location: string }
-export interface CapDay { employeeId: string; day: string; fraction: number; status: AppStatus }
+export interface CapDay { employeeId: string; day: string; fraction: number; status: AppStatus; wfh?: boolean }
 export type HolidayFn = (day: string, location: string) => boolean;
 
 export interface PersonCapacity {
   id: string; displayName: string;
   available: number; plannedOut: number; draftOut: number; net: number;
+  wfh: number; // approved + draft WFH days (counted as available)
 }
 export interface TeamCapacity {
   team: string;
@@ -21,6 +24,7 @@ export interface TeamCapacity {
   available: number;
   plannedOut: number;
   draftOut: number;
+  wfh: number;
   net: number; // available − planned − draft (worst case)
   netPlanned: number; // available − planned (best case)
   people: PersonCapacity[];
@@ -44,33 +48,34 @@ export function capacityByTeam(
   const per = new Map<string, PersonCapacity>();
   for (const p of people) {
     const available = workingDays(from, to, p.location, isHoliday);
-    per.set(p.id, { id: p.id, displayName: p.displayName, available, plannedOut: 0, draftOut: 0, net: available });
+    per.set(p.id, { id: p.id, displayName: p.displayName, available, plannedOut: 0, draftOut: 0, net: available, wfh: 0 });
   }
   for (const d of days) {
     if (d.day < from || d.day > to) continue;
     const pc = per.get(d.employeeId);
     if (!pc) continue;
+    if (d.wfh) { if (d.status === 'planned' || d.status === 'draft') pc.wfh += d.fraction; continue; }
     if (d.status === 'planned') pc.plannedOut += d.fraction;
     else if (d.status === 'draft') pc.draftOut += d.fraction;
   }
   const teams = new Map<string, TeamCapacity>();
   for (const p of people) {
     const pc = per.get(p.id)!;
-    pc.plannedOut = r2(pc.plannedOut); pc.draftOut = r2(pc.draftOut);
+    pc.plannedOut = r2(pc.plannedOut); pc.draftOut = r2(pc.draftOut); pc.wfh = r2(pc.wfh);
     pc.net = r2(pc.available - pc.plannedOut - pc.draftOut);
     let t = teams.get(p.team);
     if (!t) {
-      t = { team: p.team, headcount: 0, available: 0, plannedOut: 0, draftOut: 0, net: 0, netPlanned: 0, people: [] };
+      t = { team: p.team, headcount: 0, available: 0, plannedOut: 0, draftOut: 0, wfh: 0, net: 0, netPlanned: 0, people: [] };
       teams.set(p.team, t);
     }
     t.headcount++;
-    t.available += pc.available; t.plannedOut += pc.plannedOut; t.draftOut += pc.draftOut;
+    t.available += pc.available; t.plannedOut += pc.plannedOut; t.draftOut += pc.draftOut; t.wfh += pc.wfh;
     t.people.push(pc);
   }
   return [...teams.values()]
     .map((t) => ({
       ...t,
-      available: r2(t.available), plannedOut: r2(t.plannedOut), draftOut: r2(t.draftOut),
+      available: r2(t.available), plannedOut: r2(t.plannedOut), draftOut: r2(t.draftOut), wfh: r2(t.wfh),
       net: r2(t.available - t.plannedOut - t.draftOut),
       netPlanned: r2(t.available - t.plannedOut),
       people: t.people.sort((a, b) => a.displayName.localeCompare(b.displayName)),
@@ -101,7 +106,7 @@ export function teamLoad(
   // day -> team -> { planned, draft } (a person counts at most 1 per day)
   const byDay = new Map<string, Map<string, Map<string, { p: number; d: number }>>>();
   for (const d of days) {
-    if (d.day < from || d.day > to || (d.status !== 'planned' && d.status !== 'draft')) continue;
+    if (d.wfh || d.day < from || d.day > to || (d.status !== 'planned' && d.status !== 'draft')) continue; // WFH = not out
     const team = teamOf.get(d.employeeId);
     if (team === undefined) continue;
     let tm = byDay.get(d.day); if (!tm) byDay.set(d.day, (tm = new Map()));

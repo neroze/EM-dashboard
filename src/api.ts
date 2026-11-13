@@ -21,19 +21,26 @@ export function toFilters(f: UiFilters): Filters {
 }
 
 export const api = {
-  setup: (companyDomain: string, apiKey: string) => call<{ ok: boolean; myEmployeeId: string }>('setup', { companyDomain, apiKey }),
-  setupDemo: () => call<Status>('setupDemo'),
+  setup: (companyDomain: string, apiKey: string, teamName?: string, color?: string) => call<{ ok: boolean; myEmployeeId: string }>('setup', { companyDomain, apiKey, teamName, color }),
+  setupDemo: (teamName?: string, color?: string) => call<Status>('setupDemo', { teamName, color }),
+  setTeamColor: (id: string, color: string) => call<Status>('setTeamColor', { id, color }),
+  switchTeam: (id: string) => call<Status>('switchTeam', { id }),
+  addTeam: (t: { name: string; companyDomain?: string; apiKey?: string; demo?: boolean; color?: string }) => call<Status>('addTeam', t),
+  renameTeam: (name: string, id?: string) => call<Status>('renameTeam', { name, id }),
+  selectTeams: (ids: string[]) => call<Status>('selectTeams', { ids }),
+  removeTeam: (id?: string) => call<Status>('removeTeam', { id }),
   getStatus: () => call<Status>('getStatus'),
   syncNow: () => call<Status>('syncNow'),
   getSyncLog: () => call<{ at: string; ok: number; records: number; error: string | null; durationMs: number }[]>('getSyncLog'),
   getLeave: (f: UiFilters, sort?: Sort) => call<LeaveRecord[]>('getLeave', { filters: toFilters(f), sort }),
   getCalendar: (f: UiFilters) => call<CalendarData>('getCalendar', { filters: toFilters(f) }),
-  getCapacity: (f: UiFilters, sprintId?: string | null) => call<CapacityPeriod[]>('getCapacity', { filters: toFilters(f), sprintId }),
+  getCapacity: (f: UiFilters, sprintId?: string | null, byMonth = false) => call<CapacityPeriod[]>('getCapacity', { filters: toFilters(f), sprintId, byMonth }),
   getOverlaps: (f: UiFilters, threshold?: number) => call<OverlapDay[]>('getOverlaps', { filters: toFilters(f), threshold }),
   getDashboard: (f: UiFilters) => call<Dashboard>('getDashboard', { filters: toFilters(f) }),
   getYearSummary: (f: UiFilters, year: number) => call<YearSummary>('getYearSummary', { filters: toFilters(f), year }),
   getLongLeave: (f: UiFilters, year: number) => call<LongLeaveYear>('getLongLeave', { filters: toFilters(f), year }),
   approveRequest: (id: string) => call<{ ok: boolean }>('approveRequest', { id }),
+  getQuarterCapacity: (f: UiFilters, year: number, q: number) => call<QuarterCapacity>('getQuarterCapacity', { filters: toFilters(f), year, q }),
   getSummary: (f: UiFilters) => call<Summary>('getSummary', { filters: toFilters(f) }),
   getLookups: () => call<Lookups>('getLookups'),
   listViews: () => call<SavedView[]>('listViews'),
@@ -51,6 +58,14 @@ export const api = {
   signOut: () => call<{ ok: boolean }>('signOut'),
 };
 
+export interface CapTotals { working: number; plannedOut: number; draftOut: number; wfh: number; available: number; ifDrafts: number; headcount: number }
+export interface QuarterCapacity {
+  year: number; q: number; from: string; to: string; today: string;
+  total: CapTotals;
+  months: (CapTotals & { month: string; from: string; to: string })[];
+  teams: (CapTotals & { team: string })[];
+}
+
 export interface Settings {
   defaultThreshold: number;
   thresholds: Record<string, number>;
@@ -58,7 +73,7 @@ export interface Settings {
   hoursPerDay: number;
   squads: string[];
   squadMap: Record<string, string>;
-  people: { id: string; name: string; team: string | null }[];
+  people: { id: string; name: string; team: string | null; autoTeam: string | null }[];
   digest: { enabled: boolean; weekday: number; hour: number; lastSent: string | null };
   hasSlackWebhook: boolean;
 }

@@ -1,14 +1,16 @@
-// One row per request; the export writes exactly these rows in this order
-// (both use backend/domain/sort.ts).
+// One row per request, grouped under a header row per team (the chosen sort
+// applies within each team). The export writes the same rows, with a Squad
+// column instead of the headers (both use backend/domain/sort.ts).
 import { fmtDays, fmtShort, STATUS_LABEL } from '../format.ts';
 import { setState, useUi } from '../state/filters.ts';
 import type { LeaveRecord, SortKey } from '../types.ts';
 import { openInBamboo } from '../bamboo-link.ts';
 import { approveLeave } from '../approve.ts';
+import { TeamTag } from '../components/TeamColor.tsx';
+import { useTeamGroups } from '../teamColors.ts';
 
 const COLS: { key: SortKey; label: string; cls?: string }[] = [
   { key: 'person', label: 'Person' },
-  { key: 'team', label: 'Squad' },
   { key: 'status', label: 'Status' },
   { key: 'typeName', label: 'Type' },
   { key: 'startDate', label: 'Dates' },
@@ -18,6 +20,7 @@ const COLS: { key: SortKey; label: string; cls?: string }[] = [
 
 export function ListView({ rows }: { rows: LeaveRecord[] | null }) {
   const { sort } = useUi();
+  const teams = useTeamGroups(rows ?? [], (r) => r.team);
   if (!rows) return <div className="empty">Loading…</div>;
   const setSort = (key: SortKey) =>
     setState({ sort: { key, dir: sort.key === key && sort.dir === 'asc' ? 'desc' : 'asc' } });
@@ -34,11 +37,17 @@ export function ListView({ rows }: { rows: LeaveRecord[] | null }) {
             <th />
           </tr>
         </thead>
-        <tbody>
-          {rows.map((r) => (
+        {teams.map(([team, list]) => (
+        <tbody key={team}>
+          <tr className="team-head-row">
+            <td colSpan={COLS.length + 1}>
+              <TeamTag name={team} />
+              <span className="muted small">{list.length} request{list.length === 1 ? '' : 's'} · {fmtDays(list.reduce((a, r) => a + r.days, 0))}</span>
+            </td>
+          </tr>
+          {list.map((r) => (
             <tr key={r.id}>
               <td>{r.person}<div className="muted small">{r.location}</div></td>
-              <td>{r.team}</td>
               <td><span className={'badge ' + r.status}>{STATUS_LABEL[r.status]}</span></td>
               <td>{r.typeName}</td>
               <td className="nowrap">{fmtShort(r.startDate)}{r.endDate !== r.startDate ? ` – ${fmtShort(r.endDate)}` : ''}</td>
@@ -53,6 +62,7 @@ export function ListView({ rows }: { rows: LeaveRecord[] | null }) {
             </tr>
           ))}
         </tbody>
+        ))}
       </table>
       {!rows.length && <div className="empty">No leave requests match these filters.</div>}
       <div className="list-foot muted small">{rows.length} request{rows.length === 1 ? '' : 's'} · {fmtDays(rows.reduce((a, r) => a + r.days, 0))} in total</div>

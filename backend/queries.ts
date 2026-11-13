@@ -2,8 +2,8 @@
 import * as repo from './db/repo.ts';
 import { capacityByTeam, teamLoad, type CapDay, type OverlapDay, type TeamCapacity } from './domain/capacity.ts';
 import { buildDashboard, dashRanges, isWfhType, pickSprints, yearSummary } from './domain/dashboard.ts';
-import { findRuns, longLeaveYear } from './domain/longleave.ts';
-import { addDays, diffDays, eachDay, isDate, maxDate, minDate, today } from './domain/dates.ts';
+import { countsAsLongLeave, findRuns, longLeaveYear } from './domain/longleave.ts';
+import { addDays, addMonths, diffDays, eachDay, isDate, maxDate, minDate, today } from './domain/dates.ts';
 import { appStatus, bambooStatusesFor, DEFAULT_STATUSES, isActive } from './domain/status.ts';
 import type { AppStatus, Filters, Holiday, LeaveRecord } from './domain/types.ts';
 import { holidayIndex } from './sync/scheduler.ts';
@@ -42,7 +42,7 @@ export function thresholdFor(team: string): number {
 }
 
 export function linkFor(employeeId: string, requestId: string): string {
-  const domain = repo.getSetting<string>('companyDomain', '');
+  const domain = repo.getSetting<string>('linkDomain', '') || repo.getSetting<string>('companyDomain', '');
   if (!domain) return '';
   const tpl = repo.getSetting('linkTemplate', DEFAULT_LINK);
   return tpl.replaceAll('{domain}', encodeURIComponent(domain))
@@ -57,7 +57,7 @@ export function load(f: Filters): OverlapDay[] {
   if (!active.length) return [];
   const people = repo.people({ teams: f.teams, locations: f.locations });
   const days: CapDay[] = repo.days(f.from, f.to, bambooStatusesFor(active))
-    .map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus) }));
+    .map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
   return teamLoad(people, days, f.from, f.to, thresholdFor, f.overlapOnly ? f.overlapMinPeople : null);
 }
 
@@ -126,13 +126,47 @@ export function calendar(fIn: Partial<Filters>) {
   };
 }
 
-export interface CapacityPeriod { id: string; name: string; from: string; to: string; teams: (TeamCapacity & { overlapDays: number; threshold: number })[] }
+export interface CapOnLeave {
+  employeeId: string; person: string; team: string;
+  planned: number; draft: number; // leave days in the period (WFH excluded)
+  first: string; last: string; types: string[]; url: string;
+}
+export interface CapacityPeriod {
+  id: string; name: string; from: string; to: string;
+  teams: (TeamCapacity & { overlapDays: number; threshold: number })[];
+  onLeave: CapOnLeave[];
+}
+
+/** who is on leave (not WFH) in [from, to], most days first */
+function onLeaveIn(rows: { requestId: string; employeeId: string; day: string; fraction: number; bambooStatus: string; typeName: string }[],
+  from: string, to: string, who: Map<string, { name: string; team: string }>): CapOnLeave[] {
+  const m = new Map<string, CapOnLeave>();
+  for (const d of rows) {
+    if (d.day < from || d.day > to || isWfhType(d.typeName)) continue;
+    const p = who.get(d.employeeId);
+    if (!p) continue;
+    const x = m.get(d.employeeId) ?? { employeeId: d.employeeId, person: p.name, team: p.team, planned: 0, draft: 0, first: d.day, last: d.day, types: [], url: '' };
+    if (appStatus(d.bambooStatus) === 'planned') x.planned += d.fraction; else x.draft += d.fraction;
+    if (d.day < x.first) x.first = d.day;
+    if (d.day > x.last) x.last = d.day;
+    if (!x.types.includes(d.typeName)) x.types.push(d.typeName);
+    if (!x.url) x.url = linkFor(d.employeeId, d.requestId);
+    m.set(d.employeeId, x);
+  }
+  const r2 = (n: number) => Math.round(n * 100) / 100;
+  return [...m.values()].map((x) => ({ ...x, planned: r2(x.planned), draft: r2(x.draft) }))
+    .sort((a, b) => b.planned + b.draft - (a.planned + a.draft) || a.person.localeCompare(b.person));
+}
 
 /** capacity per team for each sprint in the range (or the one sprint asked for) */
-export function capacity(fIn: Partial<Filters>, sprintName?: string | null): CapacityPeriod[] {
+/** byMonth: one period per calendar month of the range (clipped to it)
+ *  instead of one per sprint */
+export function capacity(fIn: Partial<Filters>, sprintName?: string | null, byMonth = false): CapacityPeriod[] {
   const f = normalize(fIn);
-  const sprints = uniqueSprints().filter((s) => (sprintName ? s.name === sprintName : s.endDate >= f.from && s.startDate <= f.to));
-  const periods = sprints.length
+  const sprints = byMonth ? [] : uniqueSprints().filter((s) => (sprintName ? s.name === sprintName : s.endDate >= f.from && s.startDate <= f.to));
+  const periods = byMonth
+    ? monthPeriods(f.from, f.to)
+    : sprints.length
     ? sprints.map((s) => ({ id: s.name, name: s.name, from: s.startDate, to: s.endDate }))
     : [{ id: 'range', name: 'Selected range', from: f.from, to: f.to }];
   const lo = periods.reduce((a, p) => minDate(a, p.from), periods[0].from);
@@ -141,10 +175,12 @@ export function capacity(fIn: Partial<Filters>, sprintName?: string | null): Cap
   const typeSet = f.types?.length ? new Set(f.types) : null;
   const reqType = new Map<string, string>();
   if (typeSet) for (const r of repo.requests({ ...f, from: lo, to: hi, statuses: ['planned', 'draft'], people: [], types: [] })) reqType.set(r.id, r.typeId);
-  const days: CapDay[] = repo.days(lo, hi, ['approved', 'requested'])
-    .filter((d) => !typeSet || typeSet.has(reqType.get(d.requestId) ?? ''))
-    .map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus) }));
+  const rawDays = repo.days(lo, hi, ['approved', 'requested'])
+    .filter((d) => !typeSet || typeSet.has(reqType.get(d.requestId) ?? ''));
+  const days: CapDay[] = rawDays
+    .map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
   const hol = holidayIndex(repo.holidays(lo, hi));
+  const who = new Map(people.map((p) => [p.id, { name: p.displayName, team: p.team }]));
   return periods.map((p) => {
     const ld = load({ ...f, from: p.from, to: p.to, statuses: ['planned', 'draft'], overlapOnly: false });
     return {
@@ -154,8 +190,46 @@ export function capacity(fIn: Partial<Filters>, sprintName?: string | null): Cap
         threshold: thresholdFor(t.team),
         overlapDays: ld.filter((d) => d.teams.some((x) => x.team === t.team && x.flagged)).length,
       })),
+      onLeave: onLeaveIn(rawDays, p.from, p.to, who),
     };
   });
+}
+
+export interface CapTotals { working: number; plannedOut: number; draftOut: number; wfh: number; available: number; ifDrafts: number; headcount: number }
+const capTotals = (teams: TeamCapacity[]): CapTotals => {
+  const s = (k: 'available' | 'plannedOut' | 'draftOut' | 'wfh' | 'netPlanned' | 'net') => Math.round(teams.reduce((a, t) => a + t[k], 0) * 100) / 100;
+  return { working: s('available'), plannedOut: s('plannedOut'), draftOut: s('draftOut'), wfh: s('wfh'),
+    available: s('netPlanned'), ifDrafts: s('net'), headcount: teams.reduce((a, t) => a + t.headcount, 0) };
+};
+
+/** capacity for one calendar quarter: totals, per month, per squad. Same
+ *  rules as the sprint table (WFH counts as available). */
+export function quarterCapacity(fIn: Partial<Filters>, year: number, q: number) {
+  const f = normalize(fIn);
+  const t = today();
+  const yr = Number.isInteger(year) && year > 1990 && year < 2200 ? year : Number(t.slice(0, 4));
+  const qq = q >= 1 && q <= 4 ? Math.floor(q) : Math.floor((Number(t.slice(5, 7)) - 1) / 3) + 1;
+  const from = `${yr}-${String((qq - 1) * 3 + 1).padStart(2, '0')}-01`;
+  const to = addDays(addMonths(from, 3), -1);
+  const people = repo.people(f);
+  const typeSet = f.types?.length ? new Set(f.types) : null;
+  const reqType = new Map<string, string>();
+  if (typeSet) for (const r of repo.requests({ ...f, from, to, statuses: ['planned', 'draft'], people: [], types: [] })) reqType.set(r.id, r.typeId);
+  const days: CapDay[] = repo.days(from, to, ['approved', 'requested'])
+    .filter((d) => !typeSet || typeSet.has(reqType.get(d.requestId) ?? ''))
+    .map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
+  const hol = holidayIndex(repo.holidays(from, to));
+  const teams = capacityByTeam(people, days, from, to, hol);
+  const months = [0, 1, 2].map((i) => {
+    const mFrom = addMonths(from, i), mTo = addDays(addMonths(from, i + 1), -1);
+    return { month: mFrom.slice(0, 7), from: mFrom, to: mTo, ...capTotals(capacityByTeam(people, days, mFrom, mTo, hol)) };
+  });
+  return {
+    year: yr, q: qq, from, to, today: t,
+    total: capTotals(teams),
+    months,
+    teams: teams.map((x) => ({ team: x.team, ...capTotals([x]) })),
+  };
 }
 
 export function overlaps(fIn: Partial<Filters>, threshold?: number | null) {
@@ -163,7 +237,7 @@ export function overlaps(fIn: Partial<Filters>, threshold?: number | null) {
   const active = (f.statuses ?? DEFAULT_STATUSES).filter(isActive);
   const people = repo.people({ teams: f.teams, locations: f.locations });
   const days: CapDay[] = repo.days(f.from, f.to, bambooStatusesFor(active))
-    .map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus) }));
+    .map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
   const th = threshold && threshold > 0 ? () => threshold : thresholdFor;
   return teamLoad(people, days, f.from, f.to, th).filter((d) => d.flagged);
 }
@@ -226,14 +300,18 @@ export function longLeave(fIn: Partial<Filters>, y: number) {
   const yr = Number.isInteger(y) && y > 1990 && y < 2200 ? y : Number(t.slice(0, 4));
   // a margin either side so runs crossing New Year are measured whole
   const from = addDays(`${yr}-01-01`, -45), to = addDays(`${yr}-12-31`, 45);
+  // scheduled leave only: work from home, sick and substitute leave (and
+  // their days) never reach the runs
   const recs = repo.requests({ from, to, statuses: ['planned', 'draft'], teams: f.teams, people: f.people, locations: f.locations })
+    .filter((x) => countsAsLongLeave(x.typeName))
     .map((x) => ({
       id: x.id, employeeId: x.employeeId, person: x.person, team: x.team, status: appStatus(x.bambooStatus),
       typeName: x.typeName, startDate: x.startDate, endDate: x.endDate, url: linkFor(x.employeeId, x.id),
     }));
   const loc = new Map(repo.people().map((p) => [p.id, p.location]));
   const hol = holidayIndex(repo.holidays(from, to));
-  const runs = findRuns(recs, repo.days(from, to, ['approved', 'requested']), (d, emp) => hol(d, loc.get(emp) ?? ''));
+  const days = repo.days(from, to, ['approved', 'requested']).filter((d) => countsAsLongLeave(d.typeName));
+  const runs = findRuns(recs, days, (d, emp) => hol(d, loc.get(emp) ?? ''));
   return longLeaveYear(yr, t, runs, repo.earliestDay());
 }
 
@@ -268,8 +346,17 @@ export function digest(): { title: string; text: string } {
   const title = `Leave Radar — next two weeks (${t} → ${to})`;
   lines.push(title, '');
   if (!recs.length) lines.push('Nobody is out or has leave pending.');
-  for (const r of recs) {
-    lines.push(`• ${r.person} (${r.team}) — ${r.typeName}, ${r.startDate}${r.endDate !== r.startDate ? ' → ' + r.endDate : ''}, ${r.days} d${r.status === 'draft' ? ' — DRAFT, awaiting approval' : ''}`);
+  // grouped by team, in the app's team order
+  const ord = repo.teamOrder();
+  const byTeam = new Map<string, LeaveRecord[]>();
+  for (const r of recs) { const l = byTeam.get(r.team); if (l) l.push(r); else byTeam.set(r.team, [r]); }
+  const teams = [...byTeam].sort((a, b) => (ord.get(a[0]) ?? 1000) - (ord.get(b[0]) ?? 1000) || a[0].localeCompare(b[0]));
+  for (const [team, list] of teams) {
+    lines.push(`*${team}* (${list.length})`);
+    for (const r of list) {
+      lines.push(`  • ${r.person} — ${r.typeName}, ${r.startDate}${r.endDate !== r.startDate ? ' → ' + r.endDate : ''}, ${r.days} d${r.status === 'draft' ? ' — DRAFT, awaiting approval' : ''}`);
+    }
+    lines.push('');
   }
   const drafts = recs.filter((r) => r.status === 'draft').length;
   lines.push('', `Draft requests waiting: ${drafts}`);
@@ -283,3 +370,14 @@ export function digest(): { title: string; text: string } {
 }
 
 export type { Holiday };
+
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+/** calendar months covering from..to, each clipped to the range */
+function monthPeriods(from: string, to: string) {
+  const out: { id: string; name: string; from: string; to: string }[] = [];
+  for (let m = from.slice(0, 7) + '-01'; m <= to && out.length < 36; m = addMonths(m, 1)) {
+    const end = addDays(addMonths(m, 1), -1);
+    out.push({ id: m.slice(0, 7), name: `${MONTH_NAMES[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`, from: maxDate(m, from), to: minDate(end, to) });
+  }
+  return out;
+}

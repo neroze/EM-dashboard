@@ -88,18 +88,18 @@ function parse(d) {
 }
 function fmt(ms) {
   const d = new Date(ms);
-  const p = (n) => String(n).padStart(2, "0");
+  const p = (n2) => String(n2).padStart(2, "0");
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
 }
 function isDate(s) {
   return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 }
-function addDays(d, n) {
-  return fmt(parse(d) + n * DAY_MS);
+function addDays(d, n2) {
+  return fmt(parse(d) + n2 * DAY_MS);
 }
-function addMonths(d, n) {
+function addMonths(d, n2) {
   const [y, m, day] = d.split("-").map(Number);
-  const t = new Date(Date.UTC(y, m - 1 + n, 1));
+  const t = new Date(Date.UTC(y, m - 1 + n2, 1));
   const last = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() + 1, 0)).getUTCDate();
   return fmt(Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), Math.min(day, last)));
 }
@@ -116,7 +116,7 @@ function isWeekend(d) {
   return wd === 0 || wd === 6;
 }
 function today(now = /* @__PURE__ */ new Date()) {
-  const p = (n) => String(n).padStart(2, "0");
+  const p = (n2) => String(n2).padStart(2, "0");
   return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
 }
 function maxDate(a, b) {
@@ -219,7 +219,7 @@ function isActive(s) {
 }
 
 // ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/db/schema.ts
-var SCHEMA_VERSION = 1;
+var SCHEMA_VERSION = 2;
 var SCHEMA = `
 CREATE TABLE IF NOT EXISTS employee (
   id            TEXT PRIMARY KEY,   -- BambooHR employee id
@@ -227,7 +227,22 @@ CREATE TABLE IF NOT EXISTS employee (
   team          TEXT,               -- squad from the local squads mapping
   location      TEXT,
   reports_to_id TEXT,
-  in_scope      INTEGER NOT NULL    -- 1 if in my subtree
+  in_scope      INTEGER NOT NULL    -- 1 if a member of a SELECTED team (see team_member)
+);
+
+-- who belongs to which team: the active reporting line of that team's key
+CREATE TABLE IF NOT EXISTS team_member (
+  team_id       TEXT NOT NULL,
+  employee_id   TEXT NOT NULL,
+  PRIMARY KEY (team_id, employee_id)
+);
+
+-- team names (mirrors teams.json; ord = selected teams first) so a person's
+-- squad can default to their team's name, renames included
+CREATE TABLE IF NOT EXISTS team_info (
+  team_id       TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  ord           INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS leave_request (
@@ -277,6 +292,8 @@ function q(sql) {
   return s;
 }
 var all = (sql, ...p) => q(sql).all(...p);
+var teamOf = (t) => `COALESCE(${t}.team, (SELECT ti.name FROM team_member tm JOIN team_info ti ON ti.team_id = tm.team_id
+  WHERE tm.employee_id = ${t}.id ORDER BY ti.ord LIMIT 1), 'Unassigned')`;
 var run = (sql, ...p) => {
   q(sql).run(...p);
 };
@@ -297,29 +314,10 @@ function open(path) {
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 2000;");
   const v = db.prepare("PRAGMA user_version").all()[0]?.user_version ?? 0;
   if (v !== 0 && v !== SCHEMA_VERSION) {
-    db.exec("DROP TABLE IF EXISTS leave_day; DROP TABLE IF EXISTS leave_request; DROP TABLE IF EXISTS employee;DROP TABLE IF EXISTS holiday; DROP TABLE IF EXISTS sprint; DROP TABLE IF EXISTS leave_type; DROP TABLE IF EXISTS sync_log;");
+    db.exec("DROP TABLE IF EXISTS leave_day; DROP TABLE IF EXISTS leave_request; DROP TABLE IF EXISTS employee; DROP TABLE IF EXISTS team_member;DROP TABLE IF EXISTS holiday; DROP TABLE IF EXISTS sprint; DROP TABLE IF EXISTS leave_type; DROP TABLE IF EXISTS sync_log;");
   }
   db.exec(SCHEMA);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-}
-function close() {
-  for (const s of cache.values()) {
-    try {
-      s.finalize();
-    } catch {
-    }
-  }
-  cache.clear();
-  try {
-    db?.close();
-  } catch {
-  }
-  db = null;
-}
-function wipeCache() {
-  db.exec(`DELETE FROM leave_day; DELETE FROM leave_request; DELETE FROM employee; DELETE FROM holiday;
-    DELETE FROM leave_type; DELETE FROM sync_log;
-    DELETE FROM setting WHERE key IN ('employeesSyncedAt', 'metaSyncedAt', 'myEmployeeId');`);
 }
 function getSetting(key, fallback) {
   const r = all("SELECT value_json FROM setting WHERE key = ?", key)[0];
@@ -330,6 +328,9 @@ function getSetting(key, fallback) {
     return fallback;
   }
 }
+function deleteSetting(key) {
+  run("DELETE FROM setting WHERE key = ?", key);
+}
 function setSetting(key, value) {
   run(
     "INSERT INTO setting(key, value_json) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
@@ -337,28 +338,64 @@ function setSetting(key, value) {
     JSON.stringify(value)
   );
 }
-function replaceEmployees(list) {
+function replaceTeamEmployees(teamId, list) {
   tx(() => {
-    run("CREATE TEMP TABLE IF NOT EXISTS keep_emp (id TEXT PRIMARY KEY)");
-    run("DELETE FROM keep_emp");
     for (const e of list) {
       run(
-        `INSERT INTO employee(id, display_name, team, location, reports_to_id, in_scope) VALUES (?,?,?,?,?,?)
+        `INSERT INTO employee(id, display_name, team, location, reports_to_id, in_scope) VALUES (?,?,?,?,?,0)
            ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, team=excluded.team,
-             location=excluded.location, reports_to_id=excluded.reports_to_id, in_scope=excluded.in_scope`,
+             location=excluded.location, reports_to_id=excluded.reports_to_id`,
         e.id,
         e.displayName,
         e.team,
         e.location,
-        e.reportsToId,
-        e.inScope ? 1 : 0
+        e.reportsToId
       );
-      run("INSERT OR IGNORE INTO keep_emp(id) VALUES (?)", e.id);
     }
-    run("DELETE FROM leave_request WHERE employee_id NOT IN (SELECT id FROM keep_emp)");
-    run("DELETE FROM leave_day WHERE employee_id NOT IN (SELECT id FROM keep_emp)");
-    run("DELETE FROM employee WHERE id NOT IN (SELECT id FROM keep_emp)");
+    run("DELETE FROM team_member WHERE team_id = ?", teamId);
+    for (const e of list) if (e.inScope) run("INSERT OR IGNORE INTO team_member(team_id, employee_id) VALUES (?,?)", teamId, e.id);
+    dropOrphanLeave();
   });
+}
+function removeTeamData(teamId) {
+  tx(() => {
+    run("DELETE FROM team_member WHERE team_id = ?", teamId);
+    dropOrphanLeave();
+  });
+}
+function dropOrphanLeave() {
+  run("DELETE FROM leave_day WHERE employee_id NOT IN (SELECT employee_id FROM team_member)");
+  run("DELETE FROM leave_request WHERE employee_id NOT IN (SELECT employee_id FROM team_member)");
+}
+function applyScope(teamIds) {
+  const ph = teamIds.map(() => "?").join(",") || "''";
+  db.prepare(`UPDATE employee SET in_scope = CASE WHEN id IN
+    (SELECT employee_id FROM team_member WHERE team_id IN (${ph})) THEN 1 ELSE 0 END`).run(...teamIds);
+}
+function teamMembers(teamId) {
+  return all(`SELECT e.id, COALESCE(e.location, '') AS location FROM team_member m JOIN employee e ON e.id = m.employee_id
+    WHERE m.team_id = ?`, teamId);
+}
+function teamsOf(employeeId, among) {
+  return all("SELECT team_id AS t FROM team_member WHERE employee_id = ?", employeeId).map((r) => r.t).filter((t) => among.includes(t));
+}
+function readLegacySettings(path, keys) {
+  const out = {};
+  try {
+    const other = new Database(path);
+    for (const k of keys) {
+      const r = other.prepare("SELECT value_json FROM setting WHERE key = ?").all(k)[0];
+      if (r) {
+        try {
+          out[k] = JSON.parse(r.value_json);
+        } catch {
+        }
+      }
+    }
+    other.close();
+  } catch {
+  }
+  return out;
 }
 function applySquads(squads) {
   tx(() => {
@@ -391,7 +428,7 @@ function replaceSprints(list) {
     );
   });
 }
-function replaceRequests(rows, days2, from, to, purgeBefore) {
+function replaceRequests(rows, days2, from, to, purgeBefore, teamId) {
   tx(() => {
     run("CREATE TEMP TABLE IF NOT EXISTS keep_req (id TEXT PRIMARY KEY)");
     run("DELETE FROM keep_req");
@@ -417,9 +454,10 @@ function replaceRequests(rows, days2, from, to, purgeBefore) {
       );
       run("INSERT OR IGNORE INTO keep_req(id) VALUES (?)", r.id);
     }
-    const gone = "SELECT id FROM leave_request WHERE end_date >= ? AND start_date <= ? AND id NOT IN (SELECT id FROM keep_req)";
-    run(`DELETE FROM leave_day WHERE request_id IN (${gone})`, from, to);
-    run(`DELETE FROM leave_request WHERE id IN (${gone})`, from, to);
+    const gone = `SELECT id FROM leave_request WHERE end_date >= ? AND start_date <= ? AND id NOT IN (SELECT id FROM keep_req)
+      AND employee_id IN (SELECT employee_id FROM team_member WHERE team_id = ?)`;
+    run(`DELETE FROM leave_day WHERE request_id IN (${gone})`, from, to, teamId);
+    run(`DELETE FROM leave_request WHERE id IN (${gone})`, from, to, teamId);
     run("DELETE FROM leave_day WHERE request_id IN (SELECT id FROM keep_req)");
     for (const d of days2) run(
       "INSERT OR REPLACE INTO leave_day(request_id, employee_id, day, fraction) VALUES (?,?,?,?)",
@@ -447,18 +485,20 @@ function syncLog(limit = 20) {
   return all("SELECT at, ok, records, error, duration_ms AS durationMs FROM sync_log ORDER BY at DESC LIMIT ?", limit);
 }
 function counts() {
-  const r = all(`SELECT (SELECT COUNT(*) FROM leave_request) AS requests, (SELECT COUNT(*) FROM leave_day) AS days,
-    (SELECT COUNT(*) FROM employee WHERE in_scope = 1) AS people`)[0];
+  const r = all(`SELECT
+      (SELECT COUNT(*) FROM leave_request r JOIN employee e ON e.id = r.employee_id WHERE e.in_scope = 1) AS requests,
+      (SELECT COUNT(*) FROM leave_day d JOIN employee e ON e.id = d.employee_id WHERE e.in_scope = 1) AS days,
+      (SELECT COUNT(*) FROM employee WHERE in_scope = 1) AS people`)[0];
   return { requests: r.requests, days: r.days, people: r.people };
 }
 function people(f = {}) {
   const where = ["in_scope = 1"];
   const p = [];
   inList(where, p, "id", f.people);
-  inList(where, p, "COALESCE(team, 'Unassigned')", f.teams);
+  inList(where, p, teamOf("e"), f.teams);
   inList(where, p, "COALESCE(location, 'Unknown')", f.locations);
-  return all(`SELECT id, display_name AS displayName, COALESCE(team, 'Unassigned') AS team,
-      COALESCE(location, 'Unknown') AS location FROM employee WHERE ${where.join(" AND ")}
+  return all(`SELECT id, display_name AS displayName, ${teamOf("e")} AS team,
+      COALESCE(location, 'Unknown') AS location FROM employee e WHERE ${where.join(" AND ")}
       ORDER BY team, display_name`, ...p);
 }
 function allEmployees() {
@@ -476,7 +516,7 @@ function requests(f) {
   inList(where, p, "r.bamboo_status", bambooStatusesFor(f.statuses));
   inList(where, p, "r.type_id", f.types);
   inList(where, p, "r.employee_id", f.people);
-  inList(where, p, "COALESCE(e.team, 'Unassigned')", f.teams);
+  inList(where, p, teamOf("e"), f.teams);
   inList(where, p, "COALESCE(e.location, 'Unknown')", f.locations);
   if (f.requestedFrom) {
     where.push("r.requested_at >= ?");
@@ -487,7 +527,7 @@ function requests(f) {
     p.push(f.requestedTo);
   }
   return all(`SELECT r.id, r.employee_id AS employeeId, e.display_name AS person,
-      COALESCE(e.team, 'Unassigned') AS team, COALESCE(e.location, 'Unknown') AS location,
+      ${teamOf("e")} AS team, COALESCE(e.location, 'Unknown') AS location,
       r.bamboo_status AS bambooStatus, r.type_id AS typeId, r.type_name AS typeName,
       r.start_date AS startDate, r.end_date AS endDate, r.amount, r.amount_unit AS amountUnit,
       r.requested_at AS requestedAt,
@@ -523,12 +563,26 @@ function sprints() {
 }
 function leaveTypes() {
   return all(`SELECT id, name FROM leave_type
-    UNION SELECT DISTINCT type_id AS id, type_name AS name FROM leave_request WHERE type_id NOT IN (SELECT id FROM leave_type)
+    UNION SELECT DISTINCT r.type_id AS id, r.type_name AS name FROM leave_request r JOIN employee e ON e.id = r.employee_id
+      WHERE e.in_scope = 1 AND r.type_id NOT IN (SELECT id FROM leave_type)
     ORDER BY name`);
 }
 function distinct(col) {
-  const fallback = col === "team" ? "Unassigned" : "Unknown";
-  return all(`SELECT DISTINCT COALESCE(${col}, '${fallback}') AS v FROM employee WHERE in_scope = 1 ORDER BY v`).map((r) => r.v);
+  const expr = col === "team" ? teamOf("e") : "COALESCE(e.location, 'Unknown')";
+  return all(`SELECT DISTINCT ${expr} AS v FROM employee e WHERE e.in_scope = 1 ORDER BY v`).map((r) => r.v);
+}
+function autoTeams() {
+  return Object.fromEntries(all(`SELECT e.id, (SELECT ti.name FROM team_member tm JOIN team_info ti ON ti.team_id = tm.team_id
+      WHERE tm.employee_id = e.id ORDER BY ti.ord LIMIT 1) AS t FROM employee e WHERE e.in_scope = 1`).filter((r) => r.t).map((r) => [r.id, r.t]));
+}
+function teamOrder() {
+  return new Map(all("SELECT name, ord FROM team_info").map((r) => [r.name, r.ord]));
+}
+function setTeamInfo(teams2) {
+  tx(() => {
+    run("DELETE FROM team_info");
+    teams2.forEach((t, i) => run("INSERT INTO team_info(team_id, name, ord) VALUES (?,?,?)", t.id, t.name, i));
+  });
 }
 function listViews() {
   return all("SELECT name, filters_json FROM saved_view ORDER BY name").map((r) => {
@@ -602,7 +656,7 @@ function toXlsx(rows) {
   const cell = (v, ref, bold = false) => typeof v === "number" ? `<c r="${ref}"><v>${v}</v></c>` : `<c r="${ref}" t="inlineStr"${bold ? ' s="1"' : ""}><is><t xml:space="preserve">${xml(v)}</t></is></c>`;
   const sheetRows = [
     `<row r="1">${EXPORT_COLUMNS.map((c, i) => cell(c.header, colName(i) + 1, true)).join("")}</row>`,
-    ...rows.map((r, n) => `<row r="${n + 2}">${EXPORT_COLUMNS.map((c, i) => cell(c.get(r), colName(i) + (n + 2))).join("")}</row>`)
+    ...rows.map((r, n2) => `<row r="${n2 + 2}">${EXPORT_COLUMNS.map((c, i) => cell(c.get(r), colName(i) + (n2 + 2))).join("")}</row>`)
   ];
   const lastRef = colName(EXPORT_COLUMNS.length - 1) + (rows.length + 1);
   const files = [
@@ -625,10 +679,10 @@ var crcTable = null;
 function crc32(b) {
   if (!crcTable) {
     crcTable = new Uint32Array(256);
-    for (let n = 0; n < 256; n++) {
-      let c2 = n;
+    for (let n2 = 0; n2 < 256; n2++) {
+      let c2 = n2;
       for (let k = 0; k < 8; k++) c2 = c2 & 1 ? 3988292384 ^ c2 >>> 1 : c2 >>> 1;
-      crcTable[n] = c2 >>> 0;
+      crcTable[n2] = c2 >>> 0;
     }
   }
   let c = 4294967295;
@@ -851,60 +905,67 @@ function stopSampling(force = false) {
 }
 
 // ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/domain/capacity.ts
-var r2 = (n) => Math.round(n * 100) / 100;
+var r2 = (n2) => Math.round(n2 * 100) / 100;
 function workingDays(from, to, location, isHoliday) {
-  let n = 0;
-  for (const d of eachDay(from, to)) if (!isWeekend(d) && !isHoliday(d, location)) n++;
-  return n;
+  let n2 = 0;
+  for (const d of eachDay(from, to)) if (!isWeekend(d) && !isHoliday(d, location)) n2++;
+  return n2;
 }
 function capacityByTeam(people3, days2, from, to, isHoliday) {
   const per = /* @__PURE__ */ new Map();
   for (const p of people3) {
     const available = workingDays(from, to, p.location, isHoliday);
-    per.set(p.id, { id: p.id, displayName: p.displayName, available, plannedOut: 0, draftOut: 0, net: available });
+    per.set(p.id, { id: p.id, displayName: p.displayName, available, plannedOut: 0, draftOut: 0, net: available, wfh: 0 });
   }
   for (const d of days2) {
     if (d.day < from || d.day > to) continue;
     const pc = per.get(d.employeeId);
     if (!pc) continue;
+    if (d.wfh) {
+      if (d.status === "planned" || d.status === "draft") pc.wfh += d.fraction;
+      continue;
+    }
     if (d.status === "planned") pc.plannedOut += d.fraction;
     else if (d.status === "draft") pc.draftOut += d.fraction;
   }
-  const teams = /* @__PURE__ */ new Map();
+  const teams2 = /* @__PURE__ */ new Map();
   for (const p of people3) {
     const pc = per.get(p.id);
     pc.plannedOut = r2(pc.plannedOut);
     pc.draftOut = r2(pc.draftOut);
+    pc.wfh = r2(pc.wfh);
     pc.net = r2(pc.available - pc.plannedOut - pc.draftOut);
-    let t = teams.get(p.team);
+    let t = teams2.get(p.team);
     if (!t) {
-      t = { team: p.team, headcount: 0, available: 0, plannedOut: 0, draftOut: 0, net: 0, netPlanned: 0, people: [] };
-      teams.set(p.team, t);
+      t = { team: p.team, headcount: 0, available: 0, plannedOut: 0, draftOut: 0, wfh: 0, net: 0, netPlanned: 0, people: [] };
+      teams2.set(p.team, t);
     }
     t.headcount++;
     t.available += pc.available;
     t.plannedOut += pc.plannedOut;
     t.draftOut += pc.draftOut;
+    t.wfh += pc.wfh;
     t.people.push(pc);
   }
-  return [...teams.values()].map((t) => ({
+  return [...teams2.values()].map((t) => ({
     ...t,
     available: r2(t.available),
     plannedOut: r2(t.plannedOut),
     draftOut: r2(t.draftOut),
+    wfh: r2(t.wfh),
     net: r2(t.available - t.plannedOut - t.draftOut),
     netPlanned: r2(t.available - t.plannedOut),
     people: t.people.sort((a, b) => a.displayName.localeCompare(b.displayName))
   })).sort((a, b) => a.team.localeCompare(b.team));
 }
 function teamLoad(people3, days2, from, to, thresholdFor2, minPeople) {
-  const teamOf = new Map(people3.map((p) => [p.id, p.team]));
+  const teamOf2 = new Map(people3.map((p) => [p.id, p.team]));
   const size = /* @__PURE__ */ new Map();
   for (const p of people3) size.set(p.team, (size.get(p.team) ?? 0) + 1);
   const byDay = /* @__PURE__ */ new Map();
   for (const d of days2) {
-    if (d.day < from || d.day > to || d.status !== "planned" && d.status !== "draft") continue;
-    const team = teamOf.get(d.employeeId);
+    if (d.wfh || d.day < from || d.day > to || d.status !== "planned" && d.status !== "draft") continue;
+    const team = teamOf2.get(d.employeeId);
     if (team === void 0) continue;
     let tm = byDay.get(d.day);
     if (!tm) byDay.set(d.day, tm = /* @__PURE__ */ new Map());
@@ -920,25 +981,25 @@ function teamLoad(people3, days2, from, to, thresholdFor2, minPeople) {
     if (isWeekend(day)) continue;
     const tm = byDay.get(day);
     if (!tm) continue;
-    const teams = [];
+    const teams2 = [];
     let peopleOut = 0;
     for (const [team, pm] of tm) {
-      let planned = 0, draft = 0, n = 0;
+      let planned = 0, draft = 0, n2 = 0;
       for (const v of pm.values()) {
         const p = Math.min(1, v.p), dd = Math.min(1 - p, v.d);
         planned += p;
         draft += dd;
-        n++;
+        n2++;
       }
       const sz = size.get(team) ?? 0;
       const o = r2(planned + draft);
       const share = sz ? o / sz : 0;
-      const flagged = minPeople && minPeople > 0 ? n >= minPeople : sz > 0 && share >= thresholdFor2(team) - 1e-9;
-      peopleOut += n;
-      teams.push({ team, out: o, planned: r2(planned), draft: r2(draft), size: sz, share: r2(share), flagged });
+      const flagged = minPeople && minPeople > 0 ? n2 >= minPeople : sz > 0 && share >= thresholdFor2(team) - 1e-9;
+      peopleOut += n2;
+      teams2.push({ team, out: o, planned: r2(planned), draft: r2(draft), size: sz, share: r2(share), flagged });
     }
-    teams.sort((a, b) => a.team.localeCompare(b.team));
-    out.push({ day, teams, peopleOut, flagged: teams.some((t) => t.flagged) });
+    teams2.sort((a, b) => a.team.localeCompare(b.team));
+    out.push({ day, teams: teams2, peopleOut, flagged: teams2.some((t) => t.flagged) });
   }
   return out;
 }
@@ -1028,14 +1089,14 @@ function dashRanges(t) {
   };
 }
 var ORDER = { planned: 0, draft: 1, denied: 2, canceled: 3 };
-var round = (n) => Math.round(n * 100) / 100;
+var round = (n2) => Math.round(n2 * 100) / 100;
 function period(from, to, recs, days2, statuses) {
   const inWin = /* @__PURE__ */ new Map();
   for (const d of days2) if (d.day >= from && d.day <= to) inWin.set(d.requestId, (inWin.get(d.requestId) ?? 0) + d.fraction);
   const items = [];
-  for (const [id, n] of inWin) {
+  for (const [id, n2] of inWin) {
     const r = recs.get(id);
-    if (r && statuses.includes(r.status)) items.push({ ...r, days: round(n) });
+    if (r && statuses.includes(r.status)) items.push({ ...r, days: round(n2) });
   }
   items.sort((a, b) => ORDER[a.status] - ORDER[b.status] || a.startDate.localeCompare(b.startDate) || a.person.localeCompare(b.person));
   const counts2 = { planned: 0, draft: 0, denied: 0, canceled: 0 };
@@ -1137,7 +1198,7 @@ function yearSummary(year2, t, recs, days2, dataFrom = null) {
     byType: Object.fromEntries(Object.entries(a.byType).map(([k, v]) => [k, round(v)])),
     byPerson: Object.fromEntries([...a.byPerson].map(([id, p]) => [id, { person: p.person, team: p.team, days: round(p.days), requests: p.req.size }]))
   });
-  const pad = (n) => String(n).padStart(2, "0");
+  const pad = (n2) => String(n2).padStart(2, "0");
   return {
     year: year2,
     today: t,
@@ -1151,6 +1212,8 @@ function yearSummary(year2, t, recs, days2, dataFrom = null) {
 }
 
 // ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/domain/longleave.ts
+var UNSCHEDULED_RE = /\bsick|substitut/i;
+var countsAsLongLeave = (typeName) => !isWfhType(typeName) && !UNSCHEDULED_RE.test(typeName || "");
 var LONG_DAYS = 10;
 var MINI_DAYS = 5;
 function findRuns(recs, days2, isHoliday) {
@@ -1158,7 +1221,7 @@ function findRuns(recs, days2, isHoliday) {
   const perPerson = /* @__PURE__ */ new Map();
   for (const d of days2) {
     const r = byId.get(d.requestId);
-    if (!r || !isActive(r.status) || isWfhType(r.typeName) || d.fraction <= 0) continue;
+    if (!r || !isActive(r.status) || !countsAsLongLeave(r.typeName) || d.fraction <= 0) continue;
     const m = perPerson.get(d.employeeId) ?? /* @__PURE__ */ new Map();
     const cur = m.get(d.day) ?? { fraction: 0, reqs: /* @__PURE__ */ new Set() };
     cur.fraction = Math.min(1, cur.fraction + d.fraction);
@@ -1203,8 +1266,8 @@ function findRuns(recs, days2, isHoliday) {
   return out.sort((a, b) => a.start.localeCompare(b.start) || a.person.localeCompare(b.person));
 }
 function onlyBreaksBetween(a, b, isHoliday) {
-  for (let d = addDays(a, 1), n = 0; d < b; d = addDays(d, 1), n++) {
-    if (n > 40) return false;
+  for (let d = addDays(a, 1), n2 = 0; d < b; d = addDays(d, 1), n2++) {
+    if (n2 > 40) return false;
     if (!isWeekend(d) && !isHoliday(d)) return false;
   }
   return true;
@@ -1259,11 +1322,6 @@ function people2() {
   }
   return out;
 }
-function demoSquads() {
-  const m = {};
-  for (const p of people2()) if (p.squad) m[p.id] = p.squad;
-  return m;
-}
 function rng(seed) {
   return () => {
     seed = (seed * 1664525 + 1013904223) % 4294967296;
@@ -1278,8 +1336,8 @@ function requests2() {
   const out = [];
   let id = 5e4;
   for (const p of people2()) {
-    const n = Math.round((4 + Math.floor(rand() * 5)) * span / 450);
-    for (let k = 0; k < n; k++) {
+    const n2 = Math.round((4 + Math.floor(rand() * 5)) * span / 450);
+    for (let k = 0; k < n2; k++) {
       let start = addDays(from, Math.floor(rand() * span));
       while (isWeekend(start)) start = addDays(start, 1);
       const typ = TYPES[rand() < 0.6 ? 0 : Math.floor(rand() * TYPES.length)];
@@ -1315,8 +1373,8 @@ function requests2() {
     }
   }
   for (const p of people2()) {
-    const n = Math.floor(rand() * 5) + Math.floor(span / 30);
-    for (let k = 0; k < n; k++) {
+    const n2 = Math.floor(rand() * 5) + Math.floor(span / 30);
+    for (let k = 0; k < n2; k++) {
       let d = addDays(from, Math.floor(rand() * span));
       while (isWeekend(d)) d = addDays(d, 1);
       const r = rand();
@@ -1354,10 +1412,14 @@ var HOLIDAYS = [
   { start: "2026-12-25", end: "2026-12-25", name: "Christmas Day" },
   { start: "2027-01-01", end: "2027-01-01", name: "New Year's Day" }
 ];
-function createDemoClient() {
+function demoRootFor(index, demoTeamCount) {
+  if (demoTeamCount <= 1) return DEMO_ME;
+  return index % 2 === 0 ? "9001" : "9002";
+}
+function createDemoClient(root = DEMO_ME) {
   const respond = async (path, query) => {
     await new Promise((r) => setTimeout(r, 150));
-    if (path.startsWith("employees/0")) return { id: DEMO_ME, displayName: "Demo Manager" };
+    if (path.startsWith("employees/0")) return { id: root, displayName: root === DEMO_ME ? "Demo Manager" : "Demo Lead" };
     if (path.startsWith("reports/custom") || path.startsWith("employees/directory")) {
       return { fields: [], employees: [
         { id: DEMO_ME, displayName: "Demo Manager", location: "London", supervisorEId: "", status: "Active" },
@@ -1451,8 +1513,8 @@ function requestDates(raw) {
   if (!raw?.dates || typeof raw.dates !== "object") return null;
   const out = {};
   for (const [d, v] of Object.entries(raw.dates)) {
-    const n = Number(v);
-    if (isDate(d) && Number.isFinite(n)) out[d] = n;
+    const n2 = Number(v);
+    if (isDate(d) && Number.isFinite(n2)) out[d] = n2;
   }
   return Object.keys(out).length ? out : null;
 }
@@ -1488,17 +1550,95 @@ function mapHolidays(json) {
   return out;
 }
 
+// ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/teams.ts
+var TEAM_COLORS = ["#3b82f6", "#10b981", "#8b5cf6", "#f59e0b", "#ec4899", "#14b8a6", "#f97316", "#64748b"];
+var HEX = /^#[0-9a-f]{6}$/i;
+var nextColor = (used) => TEAM_COLORS.find((c) => !used.includes(c.toLowerCase())) ?? TEAM_COLORS[used.length % TEAM_COLORS.length];
+var FILE = "teams.json";
+var state = { selected: ["default"], teams: [{ id: "default", name: "My team", color: TEAM_COLORS[0] }] };
+async function loadTeams() {
+  try {
+    const json = JSON.parse(new TextDecoder().decode(await tjs.readFile(dataPath(FILE))));
+    const teams2 = Array.isArray(json?.teams) ? json.teams.filter((t) => typeof t?.id === "string" && /^[a-z0-9-]{1,40}$/.test(t.id)).map((t) => ({ id: t.id, name: String(t.name || "Team").slice(0, 60), color: HEX.test(t.color) ? String(t.color).toLowerCase() : "" })) : [];
+    if (!teams2.length) return;
+    for (const t of teams2) if (!t.color) t.color = nextColor(teams2.map((x) => x.color).filter(Boolean));
+    const raw = Array.isArray(json.selected) ? json.selected : json.active ? [json.active] : [];
+    const selected = raw.filter((id) => teams2.some((t) => t.id === id));
+    state = { teams: teams2, selected: selected.length ? selected : [teams2[0].id] };
+  } catch {
+  }
+}
+async function save() {
+  await tjs.writeFile(dataPath(FILE), new TextEncoder().encode(JSON.stringify(state, null, 2) + "\n"));
+}
+var teams = () => state.teams.map((t) => ({ ...t }));
+var selectedIds = () => [...state.selected];
+var selectedTeams = () => state.teams.filter((t) => state.selected.includes(t.id));
+var primaryTeam = () => selectedTeams()[0] ?? state.teams[0];
+var legacyDbFileFor = (id) => id === "default" ? null : `leave-radar-${id}.sqlite`;
+var teamKey = (id, name) => id === "default" ? name : `team.${id}.${name}`;
+var secretName = teamKey;
+function withoutTeamNames(map) {
+  const names = new Set(state.teams.map((t) => t.name.trim().toLowerCase()));
+  return Object.fromEntries(Object.entries(map).filter(([, sq]) => !names.has(String(sq).trim().toLowerCase())));
+}
+async function setSelected(ids) {
+  const ok = ids.filter((id, i) => ids.indexOf(id) === i && state.teams.some((t) => t.id === id));
+  if (!ok.length) throw new Error("Pick at least one team.");
+  state.selected = ok;
+  await save();
+}
+async function setTeamColor(id, color) {
+  const t = state.teams.find((x) => x.id === id);
+  if (!t) throw new Error("No such team.");
+  if (!HEX.test(color)) throw new Error("Pick a colour like #3b82f6.");
+  t.color = color.toLowerCase();
+  await save();
+}
+async function addTeam(name, color) {
+  const clean = cleanName(name);
+  if (state.teams.some((t2) => t2.name.toLowerCase() === clean.toLowerCase())) throw new Error(`There is already a team called \u201C${clean}\u201D.`);
+  const base2 = clean.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 30) || "team";
+  let id = base2, n2 = 2;
+  while (id === "default" || state.teams.some((t2) => t2.id === id)) id = `${base2}-${n2++}`;
+  const t = { id, name: clean, color: color && HEX.test(color) ? color.toLowerCase() : nextColor(state.teams.map((x) => x.color)) };
+  state.teams.push(t);
+  await save();
+  return t;
+}
+async function renameTeam(id, name) {
+  const t = state.teams.find((x) => x.id === id);
+  if (!t) throw new Error("No such team.");
+  const clean = cleanName(name);
+  if (state.teams.some((x) => x.id !== id && x.name.toLowerCase() === clean.toLowerCase())) throw new Error(`There is already a team called \u201C${clean}\u201D.`);
+  t.name = clean;
+  await save();
+}
+async function removeTeam(id) {
+  state.teams = state.teams.filter((t) => t.id !== id);
+  if (!state.teams.length) state.teams = [{ id: "default", name: "My team", color: TEAM_COLORS[0] }];
+  state.selected = state.selected.filter((s) => state.teams.some((t) => t.id === s));
+  if (!state.selected.length) state.selected = [state.teams[0].id];
+  await save();
+}
+function cleanName(name) {
+  const s = String(name ?? "").trim().replace(/\s+/g, " ").slice(0, 60);
+  if (!s) throw new Error("Give the team a name, e.g. \u201CSOC\u201D or \u201CData Platform\u201D.");
+  return s;
+}
+
 // ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/secrets.ts
 var KEY = "bamboohr.apiKey";
 var DOMAIN = "bamboohr.companyDomain";
 var SLACK = "digest.slackWebhook";
-async function getCredentials(app) {
-  const [apiKey, companyDomain] = await Promise.all([app.secrets.get(KEY), app.secrets.get(DOMAIN)]);
+var n = (name, team = primaryTeam().id) => secretName(team, name);
+async function getCredentials(app, team) {
+  const [apiKey, companyDomain] = await Promise.all([app.secrets.get(n(KEY, team)), app.secrets.get(n(DOMAIN, team))]);
   return apiKey && companyDomain ? { apiKey, companyDomain } : null;
 }
-async function setCredentials(app, companyDomain, apiKey) {
-  await app.secrets.set(DOMAIN, companyDomain);
-  await app.secrets.set(KEY, apiKey);
+async function setCredentials(app, companyDomain, apiKey, team) {
+  await app.secrets.set(n(DOMAIN, team), companyDomain);
+  await app.secrets.set(n(KEY, team), apiKey);
 }
 async function getSlackWebhook(app) {
   return app.secrets.get(SLACK);
@@ -1507,8 +1647,8 @@ async function setSlackWebhook(app, url) {
   if (url) await app.secrets.set(SLACK, url);
   else await app.secrets.delete(SLACK);
 }
-async function clearAll(app) {
-  await Promise.all([app.secrets.delete(KEY), app.secrets.delete(DOMAIN), app.secrets.delete(SLACK)]);
+async function clearAll(app, team) {
+  await Promise.all([app.secrets.delete(n(KEY, team)), app.secrets.delete(n(DOMAIN, team))]);
 }
 
 // ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/sync/orgTree.ts
@@ -1548,9 +1688,15 @@ var timer2 = null;
 var lastError = null;
 var lastRunAt = null;
 var syncState = () => ({ syncing: running !== null, lastError, lastRunAt });
-async function clientFor(app) {
-  if (getSetting("demo", false)) return { client: createDemoClient(), demo: true };
-  const creds = await getCredentials(app);
+var teamSetting = (team, key, fallback) => getSetting(teamKey(team, key), fallback);
+var setTeamSetting = (team, key, value) => setSetting(teamKey(team, key), value);
+async function clientFor(app, team = primaryTeam().id) {
+  if (teamSetting(team, "demo", false)) {
+    const demoTeams = teams().filter((t) => teamSetting(t.id, "demo", false)).map((t) => t.id);
+    const root = demoRootFor(demoTeams.indexOf(team), demoTeams.length);
+    return { client: createDemoClient(root), demo: true, demoRoot: root };
+  }
+  const creds = await getCredentials(app, team);
   return creds ? { client: createClient(creds.companyDomain, creds.apiKey), demo: false } : null;
 }
 function resetSyncState() {
@@ -1567,21 +1713,29 @@ function syncNow(app, opts = {}) {
   return running;
 }
 async function doSync(app, full) {
+  lastRunAt = (/* @__PURE__ */ new Date()).toISOString();
+  const errors = [];
+  let any = false;
+  for (const team of selectedTeams()) {
+    const c = await clientFor(app, team.id);
+    if (!c) continue;
+    any = true;
+    const err = await syncTeam(team, c.client, c.demo, full, c.demoRoot);
+    if (err) errors.push(selectedTeams().length > 1 ? `${team.name}: ${err}` : err);
+  }
+  applyScope(selectedIds());
+  lastError = !any ? "Not set up" : errors.length ? errors.join(" \xB7 ") : null;
+}
+async function syncTeam(team, client, demo, full, demoRoot) {
   const t0 = Date.now();
   const at = (/* @__PURE__ */ new Date()).toISOString();
-  lastRunAt = at;
-  const c = await clientFor(app);
-  if (!c) {
-    lastError = "Not set up";
-    return;
-  }
-  const { client, demo } = c;
   try {
     const now = Date.now();
     const t = today();
     const from = minDate(addMonths(t, -3), t.slice(0, 4) + "-01-01"), to = addMonths(t, 12);
-    const empAge = now - getSetting("employeesSyncedAt", 0);
-    if (full || empAge > DAILY_MS || counts().people === 0) {
+    const empAge = now - teamSetting(team.id, "employeesSyncedAt", 0);
+    const rootChanged = demo && teamSetting(team.id, "demoRoot", "") !== demoRoot;
+    if (full || rootChanged || empAge > DAILY_MS || teamMembers(team.id).length === 0) {
       const me = await client.get("employees/0", { fields: "id" });
       const myId = String(me?.id ?? "");
       if (!myId) throw new Error("BambooHR did not return your employee id");
@@ -1592,11 +1746,12 @@ async function doSync(app, full) {
         raw2 = await client.get("employees/directory");
       }
       const squads = await loadSquads();
-      const map = demo ? { ...demoSquads(), ...squads.map } : squads.map;
+      const map = withoutTeamNames(squads.map);
       const emps = markScope(mapEmployees(raw2, t), myId).map((e) => ({ ...e, team: map[e.id] ?? null }));
-      replaceEmployees(emps);
-      setSetting("myEmployeeId", myId);
-      setSetting("employeesSyncedAt", now);
+      replaceTeamEmployees(team.id, emps);
+      setTeamSetting(team.id, "myEmployeeId", myId);
+      setTeamSetting(team.id, "employeesSyncedAt", now);
+      if (demo) setTeamSetting(team.id, "demoRoot", demoRoot);
     }
     const metaAge = now - getSetting("metaSyncedAt", 0);
     if (full || metaAge > DAILY_MS) {
@@ -1612,7 +1767,7 @@ async function doSync(app, full) {
       end: to,
       status: "approved,requested,denied,canceled,superceded"
     });
-    const scoped = new Map(allEmployees().filter((e) => e.inScope).map((e) => [e.id, e.location ?? ""]));
+    const scoped = new Map(teamMembers(team.id).map((e) => [e.id, e.location]));
     const hol = holidayIndex(holidays(from, to));
     const hoursPerDay = getSetting("hoursPerDay", 8);
     const rows = [];
@@ -1624,15 +1779,16 @@ async function doSync(app, full) {
       const loc = scoped.get(row.employeeId);
       days2.push(...expandDays(row, requestDates(r), (d) => hol(d, loc), hoursPerDay));
     }
-    replaceRequests(rows, days2, from, to, from);
-    lastError = null;
+    replaceRequests(rows, days2, from, to, from, team.id);
     logSync(at, true, rows.length, null, Date.now() - t0);
+    return null;
   } catch (e) {
-    lastError = String(e?.message ?? e);
+    const msg = String(e?.message ?? e);
     try {
-      logSync(at, false, 0, lastError, Date.now() - t0);
+      logSync(at, false, 0, `${team.name}: ${msg}`, Date.now() - t0);
     } catch {
     }
+    return msg;
   }
 }
 function holidayIndex(list) {
@@ -1691,7 +1847,7 @@ function thresholdFor(team) {
   return v > 0 && v <= 1 ? v : DEFAULT_THRESHOLD;
 }
 function linkFor(employeeId, requestId) {
-  const domain = getSetting("companyDomain", "");
+  const domain = getSetting("linkDomain", "") || getSetting("companyDomain", "");
   if (!domain) return "";
   const tpl = getSetting("linkTemplate", DEFAULT_LINK);
   return tpl.replaceAll("{domain}", encodeURIComponent(domain)).replaceAll("{employeeId}", encodeURIComponent(employeeId)).replaceAll("{requestId}", encodeURIComponent(requestId));
@@ -1700,7 +1856,7 @@ function load(f) {
   const active = (f.statuses ?? DEFAULT_STATUSES).filter(isActive);
   if (!active.length) return [];
   const people3 = people({ teams: f.teams, locations: f.locations });
-  const days2 = days(f.from, f.to, bambooStatusesFor(active)).map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus) }));
+  const days2 = days(f.from, f.to, bambooStatusesFor(active)).map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
   return teamLoad(people3, days2, f.from, f.to, thresholdFor, f.overlapOnly ? f.overlapMinPeople : null);
 }
 function overlapDaySet(f) {
@@ -1768,18 +1924,38 @@ function calendar(fIn) {
     requests: Object.fromEntries(records.map((r) => [r.id, r]))
   };
 }
-function capacity(fIn, sprintName) {
+function onLeaveIn(rows, from, to, who) {
+  const m = /* @__PURE__ */ new Map();
+  for (const d of rows) {
+    if (d.day < from || d.day > to || isWfhType(d.typeName)) continue;
+    const p = who.get(d.employeeId);
+    if (!p) continue;
+    const x = m.get(d.employeeId) ?? { employeeId: d.employeeId, person: p.name, team: p.team, planned: 0, draft: 0, first: d.day, last: d.day, types: [], url: "" };
+    if (appStatus(d.bambooStatus) === "planned") x.planned += d.fraction;
+    else x.draft += d.fraction;
+    if (d.day < x.first) x.first = d.day;
+    if (d.day > x.last) x.last = d.day;
+    if (!x.types.includes(d.typeName)) x.types.push(d.typeName);
+    if (!x.url) x.url = linkFor(d.employeeId, d.requestId);
+    m.set(d.employeeId, x);
+  }
+  const r22 = (n2) => Math.round(n2 * 100) / 100;
+  return [...m.values()].map((x) => ({ ...x, planned: r22(x.planned), draft: r22(x.draft) })).sort((a, b) => b.planned + b.draft - (a.planned + a.draft) || a.person.localeCompare(b.person));
+}
+function capacity(fIn, sprintName, byMonth = false) {
   const f = normalize(fIn);
-  const sprints2 = uniqueSprints().filter((s) => sprintName ? s.name === sprintName : s.endDate >= f.from && s.startDate <= f.to);
-  const periods = sprints2.length ? sprints2.map((s) => ({ id: s.name, name: s.name, from: s.startDate, to: s.endDate })) : [{ id: "range", name: "Selected range", from: f.from, to: f.to }];
+  const sprints2 = byMonth ? [] : uniqueSprints().filter((s) => sprintName ? s.name === sprintName : s.endDate >= f.from && s.startDate <= f.to);
+  const periods = byMonth ? monthPeriods(f.from, f.to) : sprints2.length ? sprints2.map((s) => ({ id: s.name, name: s.name, from: s.startDate, to: s.endDate })) : [{ id: "range", name: "Selected range", from: f.from, to: f.to }];
   const lo = periods.reduce((a, p) => minDate(a, p.from), periods[0].from);
   const hi = periods.reduce((a, p) => maxDate(a, p.to), periods[0].to);
   const people3 = people(f);
   const typeSet = f.types?.length ? new Set(f.types) : null;
   const reqType = /* @__PURE__ */ new Map();
   if (typeSet) for (const r of requests({ ...f, from: lo, to: hi, statuses: ["planned", "draft"], people: [], types: [] })) reqType.set(r.id, r.typeId);
-  const days2 = days(lo, hi, ["approved", "requested"]).filter((d) => !typeSet || typeSet.has(reqType.get(d.requestId) ?? "")).map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus) }));
+  const rawDays = days(lo, hi, ["approved", "requested"]).filter((d) => !typeSet || typeSet.has(reqType.get(d.requestId) ?? ""));
+  const days2 = rawDays.map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
   const hol = holidayIndex(holidays(lo, hi));
+  const who = new Map(people3.map((p) => [p.id, { name: p.displayName, team: p.team }]));
   return periods.map((p) => {
     const ld = load({ ...f, from: p.from, to: p.to, statuses: ["planned", "draft"], overlapOnly: false });
     return {
@@ -1788,15 +1964,57 @@ function capacity(fIn, sprintName) {
         ...t,
         threshold: thresholdFor(t.team),
         overlapDays: ld.filter((d) => d.teams.some((x) => x.team === t.team && x.flagged)).length
-      }))
+      })),
+      onLeave: onLeaveIn(rawDays, p.from, p.to, who)
     };
   });
+}
+var capTotals = (teams2) => {
+  const s = (k) => Math.round(teams2.reduce((a, t) => a + t[k], 0) * 100) / 100;
+  return {
+    working: s("available"),
+    plannedOut: s("plannedOut"),
+    draftOut: s("draftOut"),
+    wfh: s("wfh"),
+    available: s("netPlanned"),
+    ifDrafts: s("net"),
+    headcount: teams2.reduce((a, t) => a + t.headcount, 0)
+  };
+};
+function quarterCapacity(fIn, year2, q2) {
+  const f = normalize(fIn);
+  const t = today();
+  const yr = Number.isInteger(year2) && year2 > 1990 && year2 < 2200 ? year2 : Number(t.slice(0, 4));
+  const qq = q2 >= 1 && q2 <= 4 ? Math.floor(q2) : Math.floor((Number(t.slice(5, 7)) - 1) / 3) + 1;
+  const from = `${yr}-${String((qq - 1) * 3 + 1).padStart(2, "0")}-01`;
+  const to = addDays(addMonths(from, 3), -1);
+  const people3 = people(f);
+  const typeSet = f.types?.length ? new Set(f.types) : null;
+  const reqType = /* @__PURE__ */ new Map();
+  if (typeSet) for (const r of requests({ ...f, from, to, statuses: ["planned", "draft"], people: [], types: [] })) reqType.set(r.id, r.typeId);
+  const days2 = days(from, to, ["approved", "requested"]).filter((d) => !typeSet || typeSet.has(reqType.get(d.requestId) ?? "")).map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
+  const hol = holidayIndex(holidays(from, to));
+  const teams2 = capacityByTeam(people3, days2, from, to, hol);
+  const months = [0, 1, 2].map((i) => {
+    const mFrom = addMonths(from, i), mTo = addDays(addMonths(from, i + 1), -1);
+    return { month: mFrom.slice(0, 7), from: mFrom, to: mTo, ...capTotals(capacityByTeam(people3, days2, mFrom, mTo, hol)) };
+  });
+  return {
+    year: yr,
+    q: qq,
+    from,
+    to,
+    today: t,
+    total: capTotals(teams2),
+    months,
+    teams: teams2.map((x) => ({ team: x.team, ...capTotals([x]) }))
+  };
 }
 function overlaps(fIn, threshold) {
   const f = normalize(fIn);
   const active = (f.statuses ?? DEFAULT_STATUSES).filter(isActive);
   const people3 = people({ teams: f.teams, locations: f.locations });
-  const days2 = days(f.from, f.to, bambooStatusesFor(active)).map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus) }));
+  const days2 = days(f.from, f.to, bambooStatusesFor(active)).map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
   const th = threshold && threshold > 0 ? () => threshold : thresholdFor;
   return teamLoad(people3, days2, f.from, f.to, th).filter((d) => d.flagged);
 }
@@ -1860,7 +2078,7 @@ function longLeave(fIn, y) {
   const t = today();
   const yr = Number.isInteger(y) && y > 1990 && y < 2200 ? y : Number(t.slice(0, 4));
   const from = addDays(`${yr}-01-01`, -45), to = addDays(`${yr}-12-31`, 45);
-  const recs = requests({ from, to, statuses: ["planned", "draft"], teams: f.teams, people: f.people, locations: f.locations }).map((x) => ({
+  const recs = requests({ from, to, statuses: ["planned", "draft"], teams: f.teams, people: f.people, locations: f.locations }).filter((x) => countsAsLongLeave(x.typeName)).map((x) => ({
     id: x.id,
     employeeId: x.employeeId,
     person: x.person,
@@ -1873,7 +2091,8 @@ function longLeave(fIn, y) {
   }));
   const loc = new Map(people().map((p) => [p.id, p.location]));
   const hol = holidayIndex(holidays(from, to));
-  const runs = findRuns(recs, days(from, to, ["approved", "requested"]), (d, emp) => hol(d, loc.get(emp) ?? ""));
+  const days2 = days(from, to, ["approved", "requested"]).filter((d) => countsAsLongLeave(d.typeName));
+  const runs = findRuns(recs, days2, (d, emp) => hol(d, loc.get(emp) ?? ""));
   return longLeaveYear(yr, t, runs, earliestDay());
 }
 function uniqueSprints() {
@@ -1903,8 +2122,20 @@ function digest() {
   const title = `Leave Radar \u2014 next two weeks (${t} \u2192 ${to})`;
   lines.push(title, "");
   if (!recs.length) lines.push("Nobody is out or has leave pending.");
+  const ord = teamOrder();
+  const byTeam = /* @__PURE__ */ new Map();
   for (const r of recs) {
-    lines.push(`\u2022 ${r.person} (${r.team}) \u2014 ${r.typeName}, ${r.startDate}${r.endDate !== r.startDate ? " \u2192 " + r.endDate : ""}, ${r.days} d${r.status === "draft" ? " \u2014 DRAFT, awaiting approval" : ""}`);
+    const l = byTeam.get(r.team);
+    if (l) l.push(r);
+    else byTeam.set(r.team, [r]);
+  }
+  const teams2 = [...byTeam].sort((a, b) => (ord.get(a[0]) ?? 1e3) - (ord.get(b[0]) ?? 1e3) || a[0].localeCompare(b[0]));
+  for (const [team, list] of teams2) {
+    lines.push(`*${team}* (${list.length})`);
+    for (const r of list) {
+      lines.push(`  \u2022 ${r.person} \u2014 ${r.typeName}, ${r.startDate}${r.endDate !== r.startDate ? " \u2192 " + r.endDate : ""}, ${r.days} d${r.status === "draft" ? " \u2014 DRAFT, awaiting approval" : ""}`);
+    }
+    lines.push("");
   }
   const drafts = recs.filter((r) => r.status === "draft").length;
   lines.push("", `Draft requests waiting: ${drafts}`);
@@ -1916,14 +2147,28 @@ function digest() {
   } else lines.push("No low-capacity days.");
   return { title, text: lines.join("\n") };
 }
+var MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+function monthPeriods(from, to) {
+  const out = [];
+  for (let m = from.slice(0, 7) + "-01"; m <= to && out.length < 36; m = addMonths(m, 1)) {
+    const end = addDays(addMonths(m, 1), -1);
+    out.push({ id: m.slice(0, 7), name: `${MONTH_NAMES[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`, from: maxDate(m, from), to: minDate(end, to) });
+  }
+  return out;
+}
 
 // ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/main.ts
 var DB_FILE = "leave-radar.sqlite";
+var dbFile = () => DB_FILE;
 var ready = null;
 var whenReady = () => ready ?? Promise.reject(new Error("backend not initialised"));
 var DIGEST_DEFAULT = { enabled: false, weekday: 1, hour: 9, lastSent: null };
+async function teamConfigured(app, team) {
+  return teamSetting(team, "demo", false) || !!await getCredentials(app, team);
+}
 async function isConfigured(app) {
-  return getSetting("demo", false) || !!await getCredentials(app);
+  for (const t of selectedIds()) if (await teamConfigured(app, t)) return true;
+  return false;
 }
 async function status(app) {
   const last = lastSync();
@@ -1932,8 +2177,8 @@ async function status(app) {
   const c = counts();
   return {
     configured: await isConfigured(app),
-    demo: getSetting("demo", false),
-    companyDomain: getSetting("companyDomain", ""),
+    demo: selectedIds().some((t) => teamSetting(t, "demo", false)),
+    companyDomain: teamSetting(primaryTeam().id, "companyDomain", ""),
     syncing: s.syncing,
     lastSyncAt: good?.at ?? null,
     lastAttemptAt: last?.at ?? null,
@@ -1942,7 +2187,10 @@ async function status(app) {
     lastError: last && !last.ok ? last.error : null,
     recordCount: c.requests,
     peopleCount: c.people,
-    myEmployeeId: getSetting("myEmployeeId", null)
+    myEmployeeId: teamSetting(primaryTeam().id, "myEmployeeId", null),
+    team: primaryTeam(),
+    teams: teams(),
+    selected: selectedIds()
   };
 }
 async function writeExport(path, filters, sort, format) {
@@ -1952,19 +2200,72 @@ async function writeExport(path, filters, sort, format) {
   await tjs.writeFile(path, bytes);
   return { path, rows: rows.length };
 }
-async function deleteCacheFiles() {
+async function deleteCacheFiles(file = dbFile()) {
   for (const suffix of ["", "-wal", "-shm"]) {
     try {
-      await tjs.remove(dataPath(DB_FILE + suffix));
+      await tjs.remove(dataPath(file + suffix));
     } catch {
     }
   }
+}
+var syncTeamInfo = () => setTeamInfo([...selectedTeams(), ...teams().filter((t) => !selectedIds().includes(t.id))]);
+async function reselect(app, ids) {
+  stopLoop();
+  await settle();
+  await setSelected(ids);
+  syncTeamInfo();
+  applyScope(selectedIds());
+  resetSyncState();
+  if (await isConfigured(app)) startLoop(app);
+  for (const ev of ["status-changed", "data-changed", "views-changed"]) app.push(ev);
+}
+function markTeamReal(team, domain, myEmployeeId) {
+  if (teamSetting(team, "demo", false)) {
+    removeTeamData(team);
+    setTeamSetting(team, "employeesSyncedAt", 0);
+  }
+  setTeamSetting(team, "demo", false);
+  setTeamSetting(team, "companyDomain", domain);
+  setTeamSetting(team, "myEmployeeId", myEmployeeId);
+  setSetting("linkDomain", domain);
+}
+function markTeamDemo(team) {
+  removeTeamData(team);
+  setTeamSetting(team, "demo", true);
+  setTeamSetting(team, "companyDomain", "demo");
+  setTeamSetting(team, "employeesSyncedAt", 0);
+  setTeamSetting(team, "demoRoot", "");
+}
+async function dropTeam(app, id) {
+  await clearAll(app, id);
+  removeTeamData(id);
+  for (const k of ["demo", "companyDomain", "myEmployeeId", "employeesSyncedAt"]) deleteSetting(teamKey(id, k));
+  await removeTeam(id);
+}
+async function checkKey(companyDomain, apiKey) {
+  const domain = cleanDomain(companyDomain);
+  const key = String(apiKey || "").trim();
+  if (key.length < 10) throw new Error("That does not look like a BambooHR API key.");
+  let me;
+  try {
+    me = await createClient(domain, key).get("employees/0", { fields: "id,displayName" });
+  } catch (e) {
+    throw new Error(e instanceof BambooError ? e.message : "Could not reach BambooHR.");
+  }
+  const myEmployeeId = String(me?.id ?? "");
+  if (!myEmployeeId) throw new Error("BambooHR accepted the key but returned no employee for it.");
+  return { domain, key, myEmployeeId };
 }
 async function postSlack(app, text) {
   const hook = await getSlackWebhook(app);
   if (!hook) throw new Error("Add a Slack incoming-webhook URL in Settings first.");
   const res = await fetch(hook, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) });
   if (!res.ok) throw new Error(`Slack returned ${res.status}`);
+}
+function manualSquads(list, map) {
+  const teamNames = new Set(teams().map((t) => t.name.trim().toLowerCase()));
+  const used = new Set(Object.values(map));
+  return [.../* @__PURE__ */ new Set([...list, ...used])].filter((q2) => q2 && !teamNames.has(q2.trim().toLowerCase()));
 }
 async function settings(app) {
   const squads = await loadSquads();
@@ -1973,46 +2274,47 @@ async function settings(app) {
     thresholds: getSetting("thresholds", {}),
     linkTemplate: getSetting("linkTemplate", DEFAULT_LINK),
     hoursPerDay: getSetting("hoursPerDay", 8),
-    squads: squads.squads.length ? squads.squads : ["SOC Workflow", "Data Platform"],
-    squadMap: squads.map,
-    people: allEmployees().filter((e) => e.inScope).map((e) => ({ id: e.id, name: e.displayName, team: e.team })),
+    // extra squads only — team names are listed as teams, never repeated here
+    squads: manualSquads(squads.squads, withoutTeamNames(squads.map)),
+    squadMap: withoutTeamNames(squads.map),
+    people: (() => {
+      const auto = autoTeams();
+      return allEmployees().filter((e) => e.inScope).map((e) => ({ id: e.id, name: e.displayName, team: e.team, autoTeam: auto[e.id] ?? null })).sort((a, b) => (a.autoTeam ?? "").localeCompare(b.autoTeam ?? "") || a.name.localeCompare(b.name));
+    })(),
     digest: getSetting("digest", DIGEST_DEFAULT),
     hasSlackWebhook: !!await getSlackWebhook(app)
   };
 }
 var api = {
   // ---- setup / status / sync ----------------------------------------------
-  setup: async ({ companyDomain, apiKey }, app) => {
+  setup: async ({ companyDomain, apiKey, teamName, color }, app) => {
     await whenReady();
-    const domain = cleanDomain(companyDomain);
-    const key = String(apiKey || "").trim();
-    if (key.length < 10) throw new Error("That does not look like a BambooHR API key.");
-    let me;
-    try {
-      me = await createClient(domain, key).get("employees/0", { fields: "id,displayName" });
-    } catch (e) {
-      throw new Error(e instanceof BambooError ? e.message : "Could not reach BambooHR.");
+    const { domain, key, myEmployeeId } = await checkKey(companyDomain, apiKey);
+    const team = primaryTeam().id;
+    if (color) await setTeamColor(team, color);
+    if (teamName?.trim()) {
+      await renameTeam(team, teamName);
+      syncTeamInfo();
     }
-    const myEmployeeId = String(me?.id ?? "");
-    if (!myEmployeeId) throw new Error("BambooHR accepted the key but returned no employee for it.");
     stopLoop();
     await settle();
-    await setCredentials(app, domain, key);
-    if (getSetting("demo", false)) wipeCache();
-    setSetting("demo", false);
-    setSetting("companyDomain", domain);
-    setSetting("myEmployeeId", myEmployeeId);
+    await setCredentials(app, domain, key, team);
+    markTeamReal(team, domain, myEmployeeId);
     resetSyncState();
     startLoop(app);
     return { ok: true, myEmployeeId };
   },
-  setupDemo: async (_, app) => {
+  setupDemo: async ({ teamName, color } = {}, app) => {
     await whenReady();
+    const team = primaryTeam().id;
+    if (color) await setTeamColor(team, color);
+    if (teamName?.trim()) {
+      await renameTeam(team, teamName);
+      syncTeamInfo();
+    }
     stopLoop();
     await settle();
-    wipeCache();
-    setSetting("demo", true);
-    setSetting("companyDomain", "demo");
+    markTeamDemo(team);
     resetSyncState();
     await syncNow(app, { full: true });
     startLoop(app, { immediate: false });
@@ -2040,9 +2342,9 @@ var api = {
     await whenReady();
     return calendar(filters);
   },
-  getCapacity: async ({ filters, sprintId }) => {
+  getCapacity: async ({ filters, sprintId, byMonth }) => {
     await whenReady();
-    return capacity(filters, sprintId);
+    return capacity(filters, sprintId, byMonth === true);
   },
   getOverlaps: async ({ filters, threshold }) => {
     await whenReady();
@@ -2069,8 +2371,10 @@ var api = {
     const req = requestById(String(id ?? ""));
     if (!req || !req.inScope) throw new Error("That request is not in your team\u2019s leave.");
     if (req.bambooStatus !== "requested") throw new Error("Only draft (requested) leave can be approved \u2014 this one is already " + req.bambooStatus + ".");
-    const c = await clientFor(app);
-    if (!c) throw new Error("Not signed in to BambooHR.");
+    const teamIds = teamsOf(req.employeeId, selectedIds());
+    let c = null;
+    for (const t of teamIds) if (c = await clientFor(app, t)) break;
+    if (!c) throw new Error("Not signed in to BambooHR for this person\u2019s team.");
     try {
       await c.client.put(`time_off/requests/${encodeURIComponent(req.id)}/status`, { status: "approved" });
     } catch (e) {
@@ -2082,6 +2386,10 @@ var api = {
     setRequestStatus(req.id, "approved");
     app.push("data-changed");
     return { ok: true };
+  },
+  getQuarterCapacity: async ({ filters, year: year2, q: q2 }) => {
+    await whenReady();
+    return quarterCapacity(filters, Number(year2), Number(q2));
   },
   getSummary: async ({ filters }) => {
     await whenReady();
@@ -2098,9 +2406,9 @@ var api = {
   },
   saveView: async ({ name, filters }, app) => {
     await whenReady();
-    const n = String(name || "").trim().slice(0, 80);
-    if (!n) throw new Error("Give the view a name.");
-    saveView(n, filters ?? {});
+    const n2 = String(name || "").trim().slice(0, 80);
+    if (!n2) throw new Error("Give the view a name.");
+    saveView(n2, filters ?? {});
     app.push("views-changed");
     return listViews();
   },
@@ -2127,8 +2435,8 @@ var api = {
   saveSettings: async (s, app) => {
     await whenReady();
     const frac = (v) => {
-      const n = Number(v);
-      return n > 0 && n <= 1 ? n : null;
+      const n2 = Number(v);
+      return n2 > 0 && n2 <= 1 ? n2 : null;
     };
     if (s.defaultThreshold !== void 0 && frac(s.defaultThreshold)) setSetting("defaultThreshold", frac(s.defaultThreshold));
     if (s.thresholds && typeof s.thresholds === "object") {
@@ -2155,9 +2463,10 @@ var api = {
     if (s.squadMap && typeof s.squadMap === "object") {
       const map = {};
       for (const [id, team] of Object.entries(s.squadMap)) if (typeof team === "string" && team) map[id] = team;
-      const squads = Array.isArray(s.squads) ? s.squads.map(String).filter(Boolean) : [...new Set(Object.values(map))];
-      await saveSquads(map, squads);
-      applySquads(map);
+      const clean = withoutTeamNames(map);
+      const squads = manualSquads(Array.isArray(s.squads) ? s.squads.map(String).filter(Boolean) : [], clean);
+      await saveSquads(clean, squads);
+      applySquads(clean);
     }
     app.push("data-changed");
     return settings(app);
@@ -2187,7 +2496,7 @@ var api = {
     let dbSizeMb = 0;
     for (const suffix of ["", "-wal"]) {
       try {
-        dbSizeMb += Number((await tjs.stat(dataPath(DB_FILE + suffix))).size) / 1048576;
+        dbSizeMb += Number((await tjs.stat(dataPath(dbFile() + suffix))).size) / 1048576;
       } catch {
       }
     }
@@ -2206,20 +2515,72 @@ var api = {
       lastSync: good ? { at: good.at, durationMs: good.duration_ms, records: good.records } : null
     };
   },
-  // ---- sign out: Keychain entries + SQLite file deleted -------------------------
-  signOut: async (_, app) => {
+  // ---- teams: one API key per team; view one team or several at once --------
+  /** view just this team */
+  switchTeam: async ({ id }, app) => {
+    await whenReady();
+    await reselect(app, [String(id)]);
+    return status(app);
+  },
+  /** view several teams at once (their union) */
+  selectTeams: async ({ ids }, app) => {
+    await whenReady();
+    await reselect(app, Array.isArray(ids) ? ids.map(String) : []);
+    return status(app);
+  },
+  /** new team: check its key first, store it under the new team, then view it */
+  addTeam: async ({ name, companyDomain, apiKey, demo, color }, app) => {
+    await whenReady();
+    const checked = demo ? null : await checkKey(companyDomain ?? "", apiKey ?? "");
+    const team = await addTeam(name, color);
+    try {
+      if (checked) {
+        await setCredentials(app, checked.domain, checked.key, team.id);
+        markTeamReal(team.id, checked.domain, checked.myEmployeeId);
+      } else markTeamDemo(team.id);
+      await reselect(app, [team.id]);
+    } catch (e) {
+      await dropTeam(app, team.id).catch(() => {
+      });
+      throw e;
+    }
+    return status(app);
+  },
+  setTeamColor: async ({ id, color }, app) => {
+    await whenReady();
+    await setTeamColor(id ? String(id) : primaryTeam().id, String(color ?? ""));
+    app.push("status-changed");
+    return status(app);
+  },
+  renameTeam: async ({ id, name }, app) => {
+    await whenReady();
+    await renameTeam(id ? String(id) : primaryTeam().id, name);
+    {
+      const sq = await loadSquads();
+      const clean = withoutTeamNames(sq.map);
+      await saveSquads(clean, manualSquads(sq.squads, clean));
+      applySquads(clean);
+    }
+    syncTeamInfo();
+    app.push("status-changed");
+    app.push("data-changed");
+    return status(app);
+  },
+  /** delete a team (default: the first selected): its key and its people */
+  removeTeam: async ({ id } = {}, app) => {
     await whenReady();
     stopLoop();
     await settle();
-    stopSampling(true);
-    await clearAll(app);
-    close();
-    await deleteCacheFiles();
+    await dropTeam(app, id ? String(id) : primaryTeam().id);
+    syncTeamInfo();
+    applyScope(selectedIds());
     resetSyncState();
-    open(dataPath(DB_FILE));
-    app.push("status-changed");
-    return { ok: true };
-  }
+    if (await isConfigured(app)) startLoop(app);
+    for (const ev of ["status-changed", "data-changed", "views-changed"]) app.push(ev);
+    return status(app);
+  },
+  // ---- sign out = remove the (first selected) team ------------------------------
+  signOut: async (_, app, meta) => api.removeTeam({}, app, meta)
 };
 async function maybeSendDigest(app) {
   const d = getSetting("digest", DIGEST_DEFAULT);
@@ -2232,10 +2593,33 @@ async function maybeSendDigest(app) {
   } catch {
   }
 }
+async function migrateLegacyTeamFiles() {
+  for (const t of teams()) {
+    const file = legacyDbFileFor(t.id);
+    if (!file) continue;
+    try {
+      await tjs.stat(dataPath(file));
+    } catch {
+      continue;
+    }
+    const old = readLegacySettings(dataPath(file), ["demo", "companyDomain", "myEmployeeId"]);
+    for (const [k, v] of Object.entries(old)) setTeamSetting(t.id, k, v);
+    if (old.companyDomain && old.companyDomain !== "demo") setSetting("linkDomain", old.companyDomain);
+    await deleteCacheFiles(file);
+  }
+}
 function init(app) {
   ready = (async () => {
     await initConfig(app);
-    open(dataPath(DB_FILE));
+    await loadTeams();
+    open(dataPath(dbFile()));
+    await migrateLegacyTeamFiles();
+    syncTeamInfo();
+    const sq = await loadSquads();
+    const clean = withoutTeamNames(sq.map);
+    if (Object.keys(clean).length !== Object.keys(sq.map).length) await saveSquads(clean, manualSquads(sq.squads, clean));
+    applySquads(clean);
+    applyScope(selectedIds());
   })();
   ready.then(async () => {
     if (await isConfigured(app)) startLoop(app);

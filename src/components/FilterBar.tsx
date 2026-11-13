@@ -6,6 +6,8 @@ import { applyFilters, defaultFilters, PRESETS, resolvePreset, setFilters, useUi
 import type { Lookups, SavedView, UiFilters } from '../types.ts';
 import { MultiSelect } from './MultiSelect.tsx';
 import { Select } from './Select.tsx';
+import { TeamTag } from './TeamColor.tsx';
+import { groupByTeam, useTeamOrder } from '../teamColors.ts';
 
 const DURATIONS: { value: UiFilters['duration']; label: string }[] = [
   { value: '', label: 'Any duration' },
@@ -32,6 +34,7 @@ export function FilterBar({ lookups, views, onSaveView, onDeleteView, dashboard,
   onToggle: () => void;
 }) {
   const { filters: f } = useUi();
+  const teamOrder = useTeamOrder();
   const [more, setMore] = useState(false);
   const showResolved = f.statuses.includes('denied') || f.statuses.includes('canceled');
   const count = activeFilterCount(f, dashboard);
@@ -72,8 +75,8 @@ export function FilterBar({ lookups, views, onSaveView, onDeleteView, dashboard,
         {!dashboard && (
           <div className="side-sec">
             <div className="side-h">Date range</div>
-            <Select title="Date range preset" value={PRESETS.some((p) => p.id === f.preset) ? f.preset : 'custom'} onChange={setPreset}
-              options={PRESETS.map((p) => ({ value: p.id, label: p.label }))} />
+            <Select title="Date range preset" value={PRESETS.some((p) => p.id === f.preset) || f.preset === 'months' ? f.preset : 'custom'} onChange={setPreset}
+              options={[...PRESETS.map((p) => ({ value: p.id, label: p.label })), ...(f.preset === 'months' ? [{ value: 'months', label: 'Month range' }] : [])]} />
             <Select title="Sprint (Sprint Mapping - Webx)" value={sprintValue}
               onChange={(v) => (v ? setPreset('sprint:' + v) : setPreset('this-sprint'))}
               options={[{ value: '', label: 'Sprint…' }, ...lookups.sprints.map((s) => ({
@@ -114,7 +117,9 @@ export function FilterBar({ lookups, views, onSaveView, onDeleteView, dashboard,
           <MultiSelect inline label="Squad" value={f.teams} onChange={(teams) => setFilters({ teams })}
             options={lookups.teams.map((t) => ({ value: t, label: t }))} />
           <MultiSelect inline label="Person" search value={f.people} onChange={(people) => setFilters({ people })}
-            options={lookups.people.map((p) => ({ value: p.id, label: p.name, hint: p.team }))} />
+            groupLabel={(g) => <TeamTag name={g} />}
+            options={groupByTeam(lookups.people, (p) => p.team, teamOrder)
+              .flatMap(([team, list]) => list.map((p) => ({ value: p.id, label: p.name, group: team })))} />
           <MultiSelect inline label="Location" value={f.locations} onChange={(locations) => setFilters({ locations })}
             options={lookups.locations.map((l) => ({ value: l, label: l }))} />
         </div>

@@ -10,7 +10,13 @@ export const toast = (text: string) => window.dispatchEvent(new CustomEvent(TOAS
 
 const pending = new Set<string>();
 
-export async function approveLeave(r: { id: string; person: string; typeName: string; startDate: string; endDate: string; days?: number }): Promise<boolean> {
+/** opts.notify: also post a system notification (for actions taken from the
+ *  menu bar, where the window and its toasts may not be in view) */
+export async function approveLeave(r: { id: string; person: string; typeName: string; startDate: string; endDate: string; days?: number }, opts: { notify?: boolean } = {}): Promise<boolean> {
+  const say = (title: string, text: string) => {
+    toast(text);
+    if (opts.notify) void tiny.notify(title, text);
+  };
   if (pending.has(r.id)) return false;
   const what = `${r.typeName}, ${fmtRange(r.startDate, r.endDate)}${r.days ? ` (${fmtDays(r.days)})` : ''}`;
   const ok = await tiny.dialog.confirm(`Approve ${r.person}’s leave?`, {
@@ -21,10 +27,10 @@ export async function approveLeave(r: { id: string; person: string; typeName: st
   pending.add(r.id);
   try {
     await api.approveRequest(r.id);
-    toast(`Approved ${r.person}’s ${r.typeName.toLowerCase()} (${fmtRange(r.startDate, r.endDate)})`);
+    say('Leave approved', `Approved ${r.person}’s ${r.typeName.toLowerCase()} (${fmtRange(r.startDate, r.endDate)})`);
     return true;
   } catch (e: any) {
-    toast('Not approved: ' + String(e?.message ?? e).replace(/^Error:\s*/, ''));
+    say('Leave not approved', String(e?.message ?? e).replace(/^Error:\s*/, ''));
     return false;
   } finally {
     pending.delete(r.id);

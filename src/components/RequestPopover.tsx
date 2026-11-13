@@ -3,6 +3,7 @@ import { fmtDays, fmtRange, STATUS_LABEL } from '../format.ts';
 import { openInBamboo } from '../bamboo-link.ts';
 import { approveLeave } from '../approve.ts';
 import type { LeaveRecord } from '../types.ts';
+import { TeamTag } from '../components/TeamColor.tsx';
 
 export function RequestPopover({ rec, x, y, onClose }: { rec: LeaveRecord; x: number; y: number; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -19,7 +20,7 @@ export function RequestPopover({ rec, x, y, onClose }: { rec: LeaveRecord; x: nu
   return (
     <div className="popover" ref={ref} style={{ left, top }}>
       <div className="pop-title">{rec.person}</div>
-      <div className="muted small">{rec.team} · {rec.location}</div>
+      <div className="small"><TeamTag name={rec.team} /> <span className="muted">· {rec.location}</span></div>
       <div className="pop-grid">
         <span>Status</span><span><span className={'badge ' + rec.status}>{STATUS_LABEL[rec.status]}</span></span>
         <span>Type</span><span>{rec.typeName}</span>

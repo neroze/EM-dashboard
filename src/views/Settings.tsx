@@ -3,11 +3,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, type Settings } from '../api.ts';
 import { fmtAgo } from '../format.ts';
+import { ColorPicker, TeamGroup, TeamTag } from '../components/TeamColor.tsx';
+import { groupByTeam, useTeamOrder } from '../teamColors.ts';
 import { Select } from '../components/Select.tsx';
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-export function SettingsSheet({ onClose, onSignedOut }: { onClose: () => void; onSignedOut: () => void }) {
+export function SettingsSheet({ onClose, onSignedOut, teams }: { onClose: () => void; onSignedOut: () => void; teams: { id: string; name: string; color: string }[] }) {
+  const [names, setNames] = useState<Record<string, string>>(() => Object.fromEntries(teams.map((t) => [t.id, t.name])));
+  const [teamMsg, setTeamMsg] = useState('');
   const [s, setS] = useState<Settings | null>(null);
   const [draft, setDraft] = useState<Settings | null>(null);
   const [webhook, setWebhook] = useState('');
@@ -27,7 +31,10 @@ export function SettingsSheet({ onClose, onSignedOut }: { onClose: () => void; o
     return () => document.removeEventListener('keydown', esc);
   }, []);
 
+  const teamOrder = useTeamOrder();
   if (!s || !draft) return null;
+  // every squad name once: the teams, then extra squads
+  const allSquadNames = [...teams.map((t) => t.name), ...draft.squads.filter((q) => !teams.some((t) => t.name.toLowerCase() === q.toLowerCase()))];
   const upd = (patch: Partial<Settings>) => setDraft({ ...draft, ...patch });
 
   const save = async () => {
@@ -43,14 +50,19 @@ export function SettingsSheet({ onClose, onSignedOut }: { onClose: () => void; o
     } catch (x: any) { setErr(String(x?.message ?? x)); }
   };
 
-  const signOut = async () => {
-    const ok = await tiny.dialog.confirm('Sign out of Leave Radar?', {
-      detail: 'Deletes the API key from the Keychain and the local leave cache. BambooHR is not affected.',
-      ok: 'Sign Out', cancel: 'Cancel',
+  const removeTeam = async (team: { id: string; name: string }) => {
+    const ok = await tiny.dialog.confirm(`Remove the team “${team.name}”?`, {
+      detail: 'Deletes this team’s API key from the Keychain and its people and leave from the local cache. Other teams and BambooHR are not affected.'
+        + (teams.length > 1 ? '' : '\n\nIt is your only team, so you will be back at the setup screen.'),
+      ok: 'Remove Team', cancel: 'Cancel',
     });
     if (!ok) return;
-    await api.signOut();
+    await api.removeTeam(team.id);
     onSignedOut();
+  };
+  const saveTeamName = async (team: { id: string; name: string }) => {
+    try { await api.renameTeam(names[team.id] ?? '', team.id); setTeamMsg(`Renamed to ${names[team.id]?.trim()}.`); }
+    catch (x: any) { setTeamMsg(String(x?.message ?? x).replace(/^Error:\s*/, '')); }
   };
 
   return (
@@ -66,34 +78,61 @@ export function SettingsSheet({ onClose, onSignedOut }: { onClose: () => void; o
         </header>
 
         <section>
-          <h3>Squads</h3>
-          <p className="muted small">Person → squad mapping (stored locally in <code>config/squads.json</code>). Unmapped people show as “Unassigned”.</p>
+          <h3>Teams</h3>
+          <p className="muted small">Each team has its own BambooHR API key (its owner’s reporting line). Choose which teams to view from the title at the top; you can also rename a team by clicking its name there. Other settings on this page apply to every team.</p>
+          {teams.map((t) => (
+            <div key={t.id} className="team-set-row">
+              <input className="team-name-input" style={{ '--tc': t.color } as React.CSSProperties} value={names[t.id] ?? ''} maxLength={60} aria-label={`Name of ${t.name}`}
+                onChange={(e) => { setNames((n) => ({ ...n, [t.id]: e.target.value })); setTeamMsg(''); }} />
+              <button type="button" onClick={() => saveTeamName(t)} disabled={!names[t.id]?.trim() || names[t.id]?.trim() === t.name}>Rename</button>
+              <button type="button" className="danger" onClick={() => removeTeam(t)}>Remove…</button>
+              <ColorPicker value={t.color} onChange={(c) => void api.setTeamColor(t.id, c)} />
+            </div>
+          ))}
+          {teamMsg && <div className="small muted">{teamMsg}</div>}
+        </section>
+
+        <section>
+          <h3>Squad overrides</h3>
+          <p className="muted small">Everyone’s squad is their team automatically (shown as <em>Auto</em>) — teams always come from team membership, so nobody shows under a team they aren’t in. Use an extra squad only to split a team further. Extra squads you add here are stored locally in <code>config/squads.json</code>.</p>
           <div className="row wrap">
+            <span className="muted small">Extra squads:</span>
             {draft.squads.map((q) => (
-              <span key={q} className="tag">{q}
-                <button type="button" className="link" title="Remove squad"
+              <span key={q} className="team-tag neutral">{q}
+                <button type="button" className="link pill-x" title={`Remove squad “${q}”`} aria-label={`Remove squad ${q}`}
                   onClick={() => upd({ squads: draft.squads.filter((x) => x !== q),
                     squadMap: Object.fromEntries(Object.entries(draft.squadMap).filter(([, t]) => t !== q)) })}>×</button>
               </span>
             ))}
+            {!draft.squads.length && <span className="muted small">none</span>}
             <input className="narrow-input" placeholder="New squad" value={newSquad} onChange={(e) => setNewSquad(e.target.value)} />
-            <button type="button" disabled={!newSquad.trim() || draft.squads.includes(newSquad.trim())}
+            <button type="button" disabled={!newSquad.trim() || allSquadNames.some((n) => n.toLowerCase() === newSquad.trim().toLowerCase())}
+              title={allSquadNames.some((n) => n.toLowerCase() === newSquad.trim().toLowerCase()) ? 'That name is already a team or squad' : undefined}
               onClick={() => { upd({ squads: [...draft.squads, newSquad.trim()] }); setNewSquad(''); }}>Add</button>
           </div>
+          {groupByTeam(draft.people, (p) => p.autoTeam ?? 'No team', teamOrder).map(([team, people]) => (
+          <TeamGroup key={team} team={team} count={people.length} className="squad-team">
           <div className="squad-grid">
-            {draft.people.map((p) => (
+            {people.map((p) => (
               <div key={p.id} className="squad-row">
-                <span>{p.name}</span>
-                <Select value={draft.squadMap[p.id] ?? ''} minWidth={140} onChange={(v) => {
-                  const m = { ...draft.squadMap };
-                  if (v) m[p.id] = v; else delete m[p.id];
-                  upd({ squadMap: m });
-                }}
-                  options={[{ value: '', label: 'Unassigned' }, ...draft.squads.map((q) => ({ value: q, label: q }))]} />
+                <span className="squad-person">{p.name}</span>
+                <Select value={draft.squadMap[p.id] ?? ''} minWidth={170}
+                  display={draft.squadMap[p.id] ? <TeamTag name={draft.squadMap[p.id]} /> : <span className="squad-auto">Auto · <TeamTag name={p.autoTeam ?? 'No team'} /></span>}
+                  onChange={(v) => {
+                    const m = { ...draft.squadMap };
+                    if (v && v !== p.autoTeam) m[p.id] = v; else delete m[p.id];
+                    upd({ squadMap: m });
+                  }}
+                  options={[
+                    { value: '', label: <span className="squad-auto">Auto · <TeamTag name={p.autoTeam ?? 'No team'} /></span> },
+                    ...draft.squads.map((q) => ({ value: q, label: <TeamTag name={q} /> })),
+                  ]} />
               </div>
             ))}
-            {!draft.people.length && <div className="muted small">People appear here after the first sync.</div>}
           </div>
+          </TeamGroup>
+          ))}
+          {!draft.people.length && <div className="muted small">People appear here after the first sync.</div>}
         </section>
 
         <section>
@@ -103,8 +142,8 @@ export function SettingsSheet({ onClose, onSignedOut }: { onClose: () => void; o
               <input type="number" min={5} max={100} step={5} className="num" value={Math.round(draft.defaultThreshold * 100)}
                 onChange={(e) => upd({ defaultThreshold: Math.max(1, Math.min(100, +e.target.value)) / 100 })} /> % of squad out
             </label>
-            {draft.squads.map((q) => (
-              <label key={q}>{q}
+            {allSquadNames.map((q) => (
+              <label key={q}><TeamTag name={q} />
                 <input type="number" min={5} max={100} step={5} className="num" placeholder={String(Math.round(draft.defaultThreshold * 100))}
                   value={draft.thresholds[q] ? Math.round(draft.thresholds[q] * 100) : ''}
                   onChange={(e) => {
@@ -174,11 +213,6 @@ export function SettingsSheet({ onClose, onSignedOut }: { onClose: () => void; o
           </table>
         </section>
 
-        <section>
-          <h3>Sign out</h3>
-          <p className="muted small">Removes the API key from the Keychain and deletes the local cache (leave, people, saved views).</p>
-          <button type="button" className="danger" onClick={signOut}>Sign out…</button>
-        </section>
       </div>
     </div>
   );

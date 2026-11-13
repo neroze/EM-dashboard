@@ -7,6 +7,8 @@ import { fmtDays, fmtShort } from '../format.ts';
 import type { KindTotals, MonthSummary, PersonTotals, UiFilters, YearSummary } from '../types.ts';
 import { Select } from '../components/Select.tsx';
 import { Sortable } from '../components/Sortable.tsx';
+import { ListModeSwitch, TeamFlow } from '../components/PeopleFlow.tsx';
+import { useListMode } from '../state/listMode.ts';
 
 type Q = 1 | 2 | 3 | 4;
 type Metric = 'days' | 'requests';
@@ -80,7 +82,7 @@ export function YearSection({ filters, version, color }: { filters: UiFilters; v
       </div>
 
       {!data ? <div className="widget"><div className="w-empty">Loading…</div></div> : (
-        <Sortable id="dash.year" className="year-grid" items={[
+        <Sortable grid minCol={290} id="dash.year" className="year-grid" items={[
           { key: 'totals', node: (
           <div className="widget">
             <div className="w-head"><span className="w-title">Selected quarters</span><span className="w-range">{selLabel} {year}</span></div>
@@ -146,9 +148,11 @@ type SortBy = 'days' | 'requests';
 /** people ranked over the selected quarters; bars on a shared scale */
 function PersonWidget({ title, range, t, color, empty }: { title: string; range: string; t: KindTotals; color: string; empty: string }) {
   const [by, setBy] = useState<SortBy>('days');
+  const [mode, setMode] = useListMode('year:' + title, 'rows');
   const rows = Object.entries(t.byPerson)
     .sort((a, b) => b[1][by] - a[1][by] || b[1][by === 'days' ? 'requests' : 'days'] - a[1][by === 'days' ? 'requests' : 'days'] || a[1].person.localeCompare(b[1].person));
   const max = rows[0]?.[1][by] ?? 0;
+  const rankOf = new Map(rows.map(([id], i) => [id, i]));
   return (
     <div className="widget">
       <div className="w-head">
@@ -163,15 +167,24 @@ function PersonWidget({ title, range, t, color, empty }: { title: string; range:
             <button type="button" key={k} className={'chip' + (by === k ? ' on' : '')} onClick={() => setBy(k)}>{k === 'days' ? 'Days' : 'Requests'}</button>
           ))}
         </div>
+        {rows.length > 0 && <ListModeSwitch mode={mode} onChange={setMode} rowsLabel="Ranked" />}
       </div>
       <div className="w-list">
-        {rows.map(([id, p], i) => (
-          <div key={id} className="meter person" title={`${p.person} · ${p.team}: ${fmtDays(p.days)}, ${p.requests} request${p.requests === 1 ? '' : 's'}`}>
-            <span className="meter-n"><span className="w-rank">{i + 1}</span> {p.person}<span className="muted small"> · {p.team}</span></span>
-            <span className="meter-bar"><span style={{ width: `${max ? (p[by] / max) * 100 : 0}%`, background: color }} /></span>
-            <span className="meter-v">{by === 'days' ? `${n2(p.days)} d` : `${p.requests}`}<span className="muted"> · {by === 'days' ? `${p.requests} req` : `${n2(p.days)} d`}</span></span>
-          </div>
-        ))}
+        <TeamFlow counts rows={mode === 'rows'} people={rows.map(([id, p]) => ({
+          key: id, name: p.person, team: p.team, status: 'planned',
+          meter: max ? p[by] / max : 0, meterColor: color,
+          value: by === 'days' ? <>{n2(p.days)} d<span className="muted"> · {p.requests} req</span></> : <>{p.requests} req<span className="muted"> · {n2(p.days)} d</span></>,
+          lead: <span className="sd-lead">{rankOf.get(id)! + 1}</span>,
+          suffix: by === 'days' ? `${n2(p.days)}d` : `${p.requests} req`,
+          title: `${p.person} · ${p.team}: ${fmtDays(p.days)}, ${p.requests} request${p.requests === 1 ? '' : 's'}`,
+          detail: mode === 'rows' ? undefined : <>
+            <span className="sd-meter"><span style={{ width: `${max ? (p[by] / max) * 100 : 0}%`, background: color }} /></span>
+            <span>{by === 'days' ? `${p.requests} req` : `${n2(p.days)} d`}</span>
+          </>,
+        }))} meta={(team) => {
+          const list = rows.filter(([, p]) => p.team === team);
+          return <span className="muted small">· {n2(list.reduce((a, [, p]) => a + p.days, 0))} d · {list.reduce((a, [, p]) => a + p.requests, 0)} req</span>;
+        }} />
         {!rows.length && <div className="w-empty">{empty}</div>}
       </div>
     </div>

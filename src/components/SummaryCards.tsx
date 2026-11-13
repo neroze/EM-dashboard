@@ -1,7 +1,9 @@
+import type { ReactNode } from 'react';
 import { setFilters } from '../state/filters.ts';
 import type { Summary } from '../types.ts';
 
-export function SummaryCards({ s, range }: { s: Summary | null; range: string }) {
+/** rangeSlot: an interactive period control in place of the plain range text */
+export function SummaryCards({ s, range, rangeSlot, rangeNote }: { s: Summary | null; range: string; rangeSlot?: ReactNode; rangeNote?: ReactNode }) {
   return (
     <div className="cards">
       <div className="card">
@@ -18,10 +20,18 @@ export function SummaryCards({ s, range }: { s: Summary | null; range: string })
         <div className={'card-n' + (s && s.overlapDays > 0 ? ' warn-text' : '')}>{s?.overlapDays ?? '–'}</div>
         <div className="card-l">overlap days in range</div>
       </button>
-      <div className="card range">
-        <div className="card-l">Range</div>
-        <div className="card-r">{range}</div>
-      </div>
+      {rangeSlot ? (
+        <div className="card range picker">
+          <div className="card-l">Months</div>
+          {rangeSlot}
+          {rangeNote && <div className="card-l">{rangeNote}</div>}
+        </div>
+      ) : (
+        <div className="card range">
+          <div className="card-l">Range</div>
+          <div className="card-r">{range}</div>
+        </div>
+      )}
     </div>
   );
 }

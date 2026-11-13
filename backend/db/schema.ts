@@ -1,7 +1,7 @@
 // SQLite schema (kept as a TS string so esbuild bundles it into the backend).
 // Bump SCHEMA_VERSION when a table changes: the cache is disposable — it is
 // dropped and refilled by the next sync, BambooHR stays the system of record.
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2; // 2: team_member (several teams in one cache)
 
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS employee (
@@ -10,7 +10,22 @@ CREATE TABLE IF NOT EXISTS employee (
   team          TEXT,               -- squad from the local squads mapping
   location      TEXT,
   reports_to_id TEXT,
-  in_scope      INTEGER NOT NULL    -- 1 if in my subtree
+  in_scope      INTEGER NOT NULL    -- 1 if a member of a SELECTED team (see team_member)
+);
+
+-- who belongs to which team: the active reporting line of that team's key
+CREATE TABLE IF NOT EXISTS team_member (
+  team_id       TEXT NOT NULL,
+  employee_id   TEXT NOT NULL,
+  PRIMARY KEY (team_id, employee_id)
+);
+
+-- team names (mirrors teams.json; ord = selected teams first) so a person's
+-- squad can default to their team's name, renames included
+CREATE TABLE IF NOT EXISTS team_info (
+  team_id       TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  ord           INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS leave_request (
