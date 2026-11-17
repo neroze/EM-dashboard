@@ -3,7 +3,7 @@
   "title": "Capacity Radar",
   "size": "1280x820",
   "id": "com.example.leave-radar",
-  "version": "0.1.0",
+  "version": "1.0.2",
   "minTinyjsVersion": "0.57.0",
   "backend": "backend/main.ts",
   "frontend": {
