@@ -46,8 +46,8 @@ export function PeopleFlow({ blocks, show = 6, unit = 'days', empty, detailed, r
     <>
       <div className="sd-list">
         {shown.map((b) => (
-          <div key={b.key} className={'sd-day' + (b.current ? ' today' : b.past ? ' past' : '')}>
-            <div className="sd-date">
+          <div key={b.key} className={'sd-day' + (b.current ? ' today' : b.past ? ' past' : '')} data-copy-group>
+            <div className="sd-date" data-copy-line>
               <b>{b.label}</b>
               {b.sub !== undefined && <span>{b.sub}</span>}
             </div>
@@ -85,8 +85,8 @@ export function TeamFlow({ people, counts, meta, empty, detailed, rows }: {
   return (
     <div className="sd-flow">
       {teams.map(([team, list]) => (
-        <div key={team} className="sd-team">
-          <div className="sd-team-h">
+        <div key={team} className="sd-team" data-copy-group>
+          <div className="sd-team-h" data-copy-line>
             <TeamTag name={team} />
             {counts && <span className="muted small">{list.length}</span>}
             {meta?.(team, list)}
@@ -107,7 +107,7 @@ export function TeamFlow({ people, counts, meta, empty, detailed, rows }: {
 /** one ranked row: rank/dot · name, with its bar + detail below · value · buttons */
 function FlowRow({ p, team }: { p: FlowPerson; team: string }) {
   return (
-    <div className={'sd-row ' + p.status} title={p.title ?? `${p.name} · ${team}`}>
+    <div className={'sd-row ' + p.status} title={p.title ?? `${p.name} · ${team}`} data-copy-line>
       <span className="sd-row-lead">{p.lead ?? <i className="sd-dot" />}</span>
       <span className="sd-row-main">
         <span className="sd-row-name">{p.name}</span>
@@ -145,14 +145,14 @@ export function ListModeSwitch({ mode, onChange, rowsLabel = 'List' }: { mode: '
 function FlowName({ p, team, detailed }: { p: FlowPerson; team: string; detailed?: boolean }) {
   const title = p.title ?? `${p.name} · ${team}`;
   const name = (
-    <span className={'sd-name ' + p.status} title={detailed && p.detail ? undefined : title}>
+    <span className={'sd-name ' + p.status} title={detailed && p.detail ? undefined : title} data-copy-line>
       {p.lead ?? <i />}<span className="sd-n">{p.name}</span>{p.suffix && <small className="sd-suffix">{p.suffix}</small>}
       {p.actions && <span className="sd-act">{p.actions}</span>}
     </span>
   );
   // with detail: name on top, detail (type, dates) on a muted line below
   return detailed && p.detail ? (
-    <span className="sd-person" title={title}>
+    <span className="sd-person" title={title} data-copy-line>
       {name}<small className="sd-detail">{p.detail}</small>
     </span>
   ) : name;

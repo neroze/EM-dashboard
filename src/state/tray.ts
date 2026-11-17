@@ -230,7 +230,7 @@ export function useTray(status: Status | null, dataVersion: number, actions: Tra
       void tiny.tray.set({
         icon: trayIcon(),
         title: d ? `${out} out` : '',
-        tooltip: d ? `Leave Radar — ${out} on leave, ${wfh} working from home today` : 'Leave Radar',
+        tooltip: d ? `Capacity Radar — ${out} on leave, ${wfh} working from home today` : 'Capacity Radar',
         menu: menu(d, status, drafts.current),
       }).catch(() => { /* no tray on this desktop */ });
     });

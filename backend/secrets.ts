@@ -31,3 +31,16 @@ export async function setSlackWebhook(app: TinyApp, url: string | null) {
 export async function clearAll(app: TinyApp, team?: string) {
   await Promise.all([app.secrets.delete(n(KEY, team)), app.secrets.delete(n(DOMAIN, team))]);
 }
+
+// Jira (read-only, app-wide): site + account email + API token, all Keychain
+const JIRA_SITE = 'jira.site', JIRA_EMAIL = 'jira.email', JIRA_TOKEN = 'jira.apiToken';
+export async function getJira(app: TinyApp): Promise<{ site: string; email: string; token: string } | null> {
+  const [site, email, token] = await Promise.all([app.secrets.get(JIRA_SITE), app.secrets.get(JIRA_EMAIL), app.secrets.get(JIRA_TOKEN)]);
+  return site && email && token ? { site, email, token } : null;
+}
+export async function setJira(app: TinyApp, v: { site: string; email: string; token: string } | null) {
+  if (!v) { await Promise.all([JIRA_SITE, JIRA_EMAIL, JIRA_TOKEN].map((k) => app.secrets.delete(k))); return; }
+  await app.secrets.set(JIRA_SITE, v.site);
+  await app.secrets.set(JIRA_EMAIL, v.email);
+  await app.secrets.set(JIRA_TOKEN, v.token);
+}

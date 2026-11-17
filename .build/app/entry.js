@@ -7,7 +7,7 @@ const EXECUTABLES = null;
 
 const app = await createApp({
   htmlPath: FRONTEND,
-  title: "Leave Radar",
+  title: "Capacity Radar",
   size: "1280x820",
   version: "0.1.0",
   tinyjsVersion: "v0.57.0",

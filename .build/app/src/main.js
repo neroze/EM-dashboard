@@ -227,6 +227,7 @@ CREATE TABLE IF NOT EXISTS employee (
   team          TEXT,               -- squad from the local squads mapping
   location      TEXT,
   reports_to_id TEXT,
+  work_email    TEXT,               -- matches Jira assignees
   in_scope      INTEGER NOT NULL    -- 1 if a member of a SELECTED team (see team_member)
 );
 
@@ -317,6 +318,7 @@ function open(path) {
     db.exec("DROP TABLE IF EXISTS leave_day; DROP TABLE IF EXISTS leave_request; DROP TABLE IF EXISTS employee; DROP TABLE IF EXISTS team_member;DROP TABLE IF EXISTS holiday; DROP TABLE IF EXISTS sprint; DROP TABLE IF EXISTS leave_type; DROP TABLE IF EXISTS sync_log;");
   }
   db.exec(SCHEMA);
+  if (!db.prepare("PRAGMA table_info(employee)").all().some((c) => c.name === "work_email")) db.exec("ALTER TABLE employee ADD COLUMN work_email TEXT");
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 function getSetting(key, fallback) {
@@ -342,14 +344,15 @@ function replaceTeamEmployees(teamId, list) {
   tx(() => {
     for (const e of list) {
       run(
-        `INSERT INTO employee(id, display_name, team, location, reports_to_id, in_scope) VALUES (?,?,?,?,?,0)
+        `INSERT INTO employee(id, display_name, team, location, reports_to_id, work_email, in_scope) VALUES (?,?,?,?,?,?,0)
            ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, team=excluded.team,
-             location=excluded.location, reports_to_id=excluded.reports_to_id`,
+             location=excluded.location, reports_to_id=excluded.reports_to_id, work_email=excluded.work_email`,
         e.id,
         e.displayName,
         e.team,
         e.location,
-        e.reportsToId
+        e.reportsToId,
+        e.workEmail ?? null
       );
     }
     run("DELETE FROM team_member WHERE team_id = ?", teamId);
@@ -428,7 +431,7 @@ function replaceSprints(list) {
     );
   });
 }
-function replaceRequests(rows, days2, from, to, purgeBefore, teamId) {
+function replaceRequests(rows, days3, from, to, purgeBefore, teamId) {
   tx(() => {
     run("CREATE TEMP TABLE IF NOT EXISTS keep_req (id TEXT PRIMARY KEY)");
     run("DELETE FROM keep_req");
@@ -459,7 +462,7 @@ function replaceRequests(rows, days2, from, to, purgeBefore, teamId) {
     run(`DELETE FROM leave_day WHERE request_id IN (${gone})`, from, to, teamId);
     run(`DELETE FROM leave_request WHERE id IN (${gone})`, from, to, teamId);
     run("DELETE FROM leave_day WHERE request_id IN (SELECT id FROM keep_req)");
-    for (const d of days2) run(
+    for (const d of days3) run(
       "INSERT OR REPLACE INTO leave_day(request_id, employee_id, day, fraction) VALUES (?,?,?,?)",
       d.requestId,
       d.employeeId,
@@ -500,6 +503,9 @@ function people(f = {}) {
   return all(`SELECT id, display_name AS displayName, ${teamOf("e")} AS team,
       COALESCE(location, 'Unknown') AS location FROM employee e WHERE ${where.join(" AND ")}
       ORDER BY team, display_name`, ...p);
+}
+function peopleWithEmail() {
+  return all(`SELECT id, display_name AS displayName, work_email AS email FROM employee WHERE in_scope = 1 ORDER BY display_name`);
 }
 function allEmployees() {
   return all(`SELECT id, display_name AS displayName, team, location, reports_to_id AS reportsToId, in_scope AS inScope
@@ -911,13 +917,13 @@ function workingDays(from, to, location, isHoliday) {
   for (const d of eachDay(from, to)) if (!isWeekend(d) && !isHoliday(d, location)) n2++;
   return n2;
 }
-function capacityByTeam(people3, days2, from, to, isHoliday) {
+function capacityByTeam(people3, days3, from, to, isHoliday) {
   const per = /* @__PURE__ */ new Map();
   for (const p of people3) {
     const available = workingDays(from, to, p.location, isHoliday);
     per.set(p.id, { id: p.id, displayName: p.displayName, available, plannedOut: 0, draftOut: 0, net: available, wfh: 0 });
   }
-  for (const d of days2) {
+  for (const d of days3) {
     if (d.day < from || d.day > to) continue;
     const pc = per.get(d.employeeId);
     if (!pc) continue;
@@ -958,12 +964,12 @@ function capacityByTeam(people3, days2, from, to, isHoliday) {
     people: t.people.sort((a, b) => a.displayName.localeCompare(b.displayName))
   })).sort((a, b) => a.team.localeCompare(b.team));
 }
-function teamLoad(people3, days2, from, to, thresholdFor2, minPeople) {
+function teamLoad(people3, days3, from, to, thresholdFor2, minPeople) {
   const teamOf2 = new Map(people3.map((p) => [p.id, p.team]));
   const size = /* @__PURE__ */ new Map();
   for (const p of people3) size.set(p.team, (size.get(p.team) ?? 0) + 1);
   const byDay = /* @__PURE__ */ new Map();
-  for (const d of days2) {
+  for (const d of days3) {
     if (d.wfh || d.day < from || d.day > to || d.status !== "planned" && d.status !== "draft") continue;
     const team = teamOf2.get(d.employeeId);
     if (team === void 0) continue;
@@ -1031,11 +1037,11 @@ function pickSprints(t, all2) {
   }
   return out;
 }
-function sprintLeave(sp, byId, days2) {
+function sprintLeave(sp, byId, days3) {
   const people3 = /* @__PURE__ */ new Map();
   const byType = {};
   let planned = 0, draft = 0;
-  for (const d of days2) {
+  for (const d of days3) {
     if (d.day < sp.startDate || d.day > sp.endDate) continue;
     const rec = byId.get(d.requestId);
     if (!rec || !isActive(rec.status)) continue;
@@ -1090,9 +1096,9 @@ function dashRanges(t) {
 }
 var ORDER = { planned: 0, draft: 1, denied: 2, canceled: 3 };
 var round = (n2) => Math.round(n2 * 100) / 100;
-function period(from, to, recs, days2, statuses) {
+function period(from, to, recs, days3, statuses) {
   const inWin = /* @__PURE__ */ new Map();
-  for (const d of days2) if (d.day >= from && d.day <= to) inWin.set(d.requestId, (inWin.get(d.requestId) ?? 0) + d.fraction);
+  for (const d of days3) if (d.day >= from && d.day <= to) inWin.set(d.requestId, (inWin.get(d.requestId) ?? 0) + d.fraction);
   const items = [];
   for (const [id, n2] of inWin) {
     const r = recs.get(id);
@@ -1103,9 +1109,9 @@ function period(from, to, recs, days2, statuses) {
   for (const i of items) counts2[i.status]++;
   return { from, to, items, people: new Set(items.filter((i) => isActive(i.status)).map((i) => i.employeeId)).size, counts: counts2 };
 }
-function section(t, r, recs, days2) {
+function section(t, r, recs, days3) {
   const byId = new Map(recs.map((x) => [x.id, x]));
-  const mine = days2.filter((d) => byId.has(d.requestId));
+  const mine = days3.filter((d) => byId.has(d.requestId));
   const active = mine.filter((d) => isActive(byId.get(d.requestId).status) && d.day >= r.month.from && d.day <= r.month.to);
   const perDay = /* @__PURE__ */ new Map();
   for (const d of active) {
@@ -1154,27 +1160,27 @@ function section(t, r, recs, days2) {
     ranking
   };
 }
-function buildDashboard(t, recs, days2, sprints2 = []) {
+function buildDashboard(t, recs, days3, sprints2 = []) {
   const r = dashRanges(t);
   const wfh = recs.filter((x) => isWfhType(x.typeName));
   const leave2 = recs.filter((x) => !isWfhType(x.typeName));
   return {
     today: t,
     ...r,
-    leave: section(t, r, leave2, days2),
-    wfh: section(t, r, wfh, days2),
+    leave: section(t, r, leave2, days3),
+    wfh: section(t, r, wfh, days3),
     wfhTypes: [...new Set(wfh.map((x) => x.typeName))].sort(),
     types: [...new Set(recs.map((x) => x.typeName))].sort(),
-    sprints: pickSprints(t, sprints2).map((sp) => sprintLeave(sp, new Map(leave2.map((x) => [x.id, x])), days2))
+    sprints: pickSprints(t, sprints2).map((sp) => sprintLeave(sp, new Map(leave2.map((x) => [x.id, x])), days3))
   };
 }
-function yearSummary(year2, t, recs, days2, dataFrom = null) {
+function yearSummary(year2, t, recs, days3, dataFrom = null) {
   const byId = new Map(recs.map((x) => [x.id, x]));
   const acc = () => ({ days: 0, req: /* @__PURE__ */ new Set(), ppl: /* @__PURE__ */ new Set(), byType: {}, byPerson: /* @__PURE__ */ new Map() });
   const m = Array.from({ length: 12 }, () => ({ leave: acc(), wfh: acc() }));
   const q2 = Array.from({ length: 4 }, () => ({ leave: acc(), wfh: acc() }));
   const y = String(year2);
-  for (const d of days2) {
+  for (const d of days3) {
     if (d.day.slice(0, 4) !== y) continue;
     const rec = byId.get(d.requestId);
     if (!rec || !isActive(rec.status)) continue;
@@ -1211,15 +1217,898 @@ function yearSummary(year2, t, recs, days2, dataFrom = null) {
   };
 }
 
+// ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/domain/projectHealth.ts
+var GREEN_MAX = 0.8;
+var AMBER_MAX = 1;
+var EPS = 1e-9;
+var HORIZON_DAYS = 730;
+var r22 = (n2) => Math.round(n2 * 100) / 100;
+function band(util) {
+  if (util <= GREEN_MAX + EPS) return "green";
+  if (util <= AMBER_MAX + EPS) return "amber";
+  return "red";
+}
+function utilisation(need, capacity2) {
+  if (need <= EPS) return 0;
+  return capacity2 <= EPS ? Infinity : need / capacity2;
+}
+var remainingOf = (t) => t.done ? 0 : Math.max(0, t.remainingDays ?? t.originalDays ?? 0);
+var doneOf = (t) => t.done ? Math.max(0, t.originalDays ?? 0) : Math.max(0, (t.originalDays ?? 0) - (t.remainingDays ?? t.originalDays ?? 0));
+function workTotals(ts) {
+  let original = 0, done = 0, remaining = 0, open2 = 0, unestimated = 0;
+  for (const t of ts) {
+    original += t.originalDays ?? 0;
+    done += doneOf(t);
+    remaining += remainingOf(t);
+    if (!t.done) open2++;
+    if (!t.done && t.originalDays === null && t.remainingDays === null) unestimated++;
+  }
+  return { original: r22(original), current: r22(done + remaining), done: r22(done), remaining: r22(remaining), tickets: ts.length, open: open2, unestimated };
+}
+function windowDays(id, from, to, day) {
+  let working = 0, unavailable = 0;
+  if (to >= from) for (const d of eachDay(from, to)) {
+    const x = day(id, d);
+    if (!x.working) continue;
+    working++;
+    unavailable += Math.min(1, Math.max(0, x.out));
+  }
+  return { working, unavailable: r22(unavailable), available: r22(working - unavailable) };
+}
+function leaveDates(id, from, to, day) {
+  const out = [];
+  if (to >= from) for (const d of eachDay(from, to)) {
+    const x = day(id, d);
+    if (x.working && x.out > EPS) out.push({ day: d, out: r22(Math.min(1, x.out)) });
+  }
+  return out;
+}
+function workingDaysLate(due, finish) {
+  if (finish <= due) return 0;
+  return eachDay(addDays(due, 1), finish).filter((d) => !isWeekend(d)).length;
+}
+function queueOrder(a, b) {
+  const k = (t) => t.sprint?.state === "active" ? 0 : t.sprint?.state === "future" ? 1 : 2;
+  return k(a) - k(b) || (a.sprint?.startDate ?? "9999").localeCompare(b.sprint?.startDate ?? "9999") || a.rank - b.rank;
+}
+var Worker = class {
+  id;
+  day;
+  used = 0;
+  // fraction of `day` already spent
+  log = /* @__PURE__ */ new Map();
+  // day → forecast work done that day
+  dayFn;
+  constructor(id, from, dayFn2) {
+    this.id = id;
+    this.day = from;
+    this.dayFn = dayFn2;
+  }
+  /** the date the person runs out of capacity on (null = never within horizon) */
+  free() {
+    return this.seek() ? this.day : null;
+  }
+  seek() {
+    for (let i = 0; i < HORIZON_DAYS; i++) {
+      const x = this.dayFn(this.id, this.day);
+      const cap = x.working ? 1 - Math.min(1, Math.max(0, x.out)) : 0;
+      if (cap - this.used > EPS) return true;
+      this.day = addDays(this.day, 1);
+      this.used = 0;
+    }
+    return false;
+  }
+  /** spend `need` days; returns the finish date, or 'never' */
+  work(need) {
+    let left = need, last = this.day;
+    if (left <= EPS) return last;
+    for (let i = 0; i < HORIZON_DAYS * 2; i++) {
+      if (!this.seek()) return "never";
+      const x = this.dayFn(this.id, this.day);
+      const cap = 1 - Math.min(1, Math.max(0, x.out)) - this.used;
+      const take = Math.min(cap, left);
+      left -= take;
+      this.used += take;
+      last = this.day;
+      if (take > EPS) this.log.set(this.day, (this.log.get(this.day) ?? 0) + take);
+      if (left <= EPS) return last;
+    }
+    return "never";
+  }
+};
+function evaluateProject(p, epics, tickets, personOf, day, today2, opts = {}) {
+  const totals = workTotals(tickets);
+  const ps = opts.progressFrom && opts.progressFrom < p.startDate ? opts.progressFrom : p.startDate;
+  const from = today2 > p.startDate ? today2 : p.startDate;
+  const yesterday = addDays(today2, -1);
+  const byPerson = /* @__PURE__ */ new Map();
+  const unassigned = [];
+  for (const t of tickets) {
+    const id = personOf(t.assigneeId);
+    if (!id) {
+      if (!t.done) unassigned.push(t);
+      continue;
+    }
+    const l = byPerson.get(id);
+    if (l) l.push(t);
+    else byPerson.set(id, [t]);
+  }
+  const workers = new Map([...byPerson.keys()].map((id) => [id, new Worker(id, from, day)]));
+  const ticketFinish = {};
+  const personFinish = /* @__PURE__ */ new Map();
+  for (const [id, ts] of byPerson) {
+    const w = workers.get(id);
+    let f = null;
+    for (const t of ts.filter((x) => !x.done).sort(queueOrder)) {
+      const r = remainingOf(t);
+      if (r <= EPS) continue;
+      f = w.work(r);
+      ticketFinish[t.key] = f;
+      if (f === "never") break;
+    }
+    personFinish.set(id, f);
+  }
+  const hasOpen = (id) => (byPerson.get(id) ?? []).some((t) => !t.done && remainingOf(t) > EPS);
+  const activeWorkers = [...workers.values()].filter((w) => hasOpen(w.id));
+  for (const t of unassigned.sort(queueOrder)) {
+    const r = remainingOf(t);
+    if (r <= EPS) continue;
+    let best = null, bestDay = "";
+    for (const w of activeWorkers) {
+      const d = w.free();
+      if (d && (!best || d < bestDay)) {
+        best = w;
+        bestDay = d;
+      }
+    }
+    ticketFinish[t.key] = best ? best.work(r) : "never";
+  }
+  const latest2 = (fs) => fs.includes("never") ? "never" : fs.reduce((m, f) => f && f !== "never" && (!m || f > m) ? f : m, null);
+  const finish = totals.remaining <= EPS ? null : latest2(Object.values(ticketFinish));
+  let pooledFinish = null;
+  if (totals.remaining > EPS) {
+    pooledFinish = "never";
+    let acc = 0;
+    for (let i = 0, d = from; i < HORIZON_DAYS; i++, d = addDays(d, 1)) {
+      for (const w of activeWorkers) {
+        const x = day(w.id, d);
+        if (x.working) acc += 1 - Math.min(1, Math.max(0, x.out));
+      }
+      if (acc >= totals.remaining - EPS) {
+        pooledFinish = d;
+        break;
+      }
+    }
+  }
+  const people3 = [...byPerson.entries()].map(([id, ts]) => {
+    const all2 = windowDays(id, ps, p.deadline, day);
+    const burned2 = windowDays(id, ps, yesterday < p.deadline ? yesterday : p.deadline, day);
+    const ahead = windowDays(id, from, p.deadline, day);
+    const wt = workTotals(ts);
+    const active = wt.remaining > EPS;
+    const u = utilisation(wt.remaining, ahead.available);
+    const f = active ? personFinish.get(id) ?? null : null;
+    return {
+      id,
+      working: all2.working,
+      leave: all2.unavailable,
+      available: all2.available,
+      burned: burned2.available,
+      workingAhead: ahead.working,
+      leaveAhead: ahead.unavailable,
+      availableAhead: ahead.available,
+      leaveDatesAhead: leaveDates(id, from, p.deadline, day),
+      remaining: wt.remaining,
+      done: wt.done,
+      openTickets: wt.open,
+      active,
+      utilisation: u,
+      band: band(u),
+      finish: f,
+      lateDays: f === "never" ? null : f ? workingDaysLate(p.deadline, f) : 0
+    };
+  }).sort((a, b2) => Number(b2.active) - Number(a.active) || b2.utilisation - a.utilisation);
+  const est = (t) => Math.max(0, t.originalDays ?? 0);
+  const before = (t) => t.done && (t.resolvedDate ? t.resolvedDate < ps : !!t.sprint?.endDate && t.sprint.endDate < ps);
+  const today_ = (t) => t.done && !before(t) && !!t.resolvedDate && t.resolvedDate >= today2;
+  const sumEst = (ts) => r22(ts.reduce((s, t) => s + est(t), 0));
+  const carriedIn = sumEst(tickets.filter(before));
+  const deliveredToday = sumEst(tickets.filter(today_));
+  const workDone = sumEst(tickets.filter((t) => t.done && !before(t) && !today_(t)));
+  const estimate = sumEst(tickets), delivered = sumEst(tickets.filter((t) => t.done));
+  const workTaken = r22(estimate - carriedIn);
+  const firstWorkDate = tickets.filter((t) => t.done && t.sprint?.startDate).map((t) => t.sprint.startDate).sort()[0] ?? null;
+  const teamIds = /* @__PURE__ */ new Set();
+  for (const [id, ts] of byPerson) if (ts.some((t) => !t.done || !before(t))) teamIds.add(id);
+  const sum2 = (k, set) => r22(people3.filter((x) => set === "active" ? x.active : teamIds.has(x.id)).reduce((s, x) => s + x[k], 0));
+  const available = sum2("available", "team"), burned = sum2("burned", "team"), availableAhead = sum2("availableAhead", "active");
+  const util = utilisation(totals.remaining, availableAhead);
+  const rate = burned > EPS && workDone > EPS ? workDone / burned : null;
+  const lateDays = finish === "never" ? null : finish ? workingDaysLate(p.deadline, finish) : 0;
+  const b = band(util);
+  const epicResults = epics.map((e) => {
+    const ts = tickets.filter((t) => t.epicKey === e.key);
+    const et = workTotals(ts);
+    const f = et.remaining <= EPS ? null : latest2(ts.filter((t) => !t.done).map((t) => ticketFinish[t.key]));
+    const due = e.dueDate ?? p.deadline;
+    const late = f === "never" ? null : f ? workingDaysLate(due, f) : 0;
+    return {
+      key: e.key,
+      totals: et,
+      finish: f,
+      dueDate: due,
+      lateDays: late,
+      health: f === "never" || (late ?? 0) > 0 ? "red" : et.unestimated ? "amber" : "green"
+    };
+  });
+  return {
+    totals,
+    scopeGrowth: r22(totals.current - totals.original),
+    working: sum2("working", "team"),
+    leave: sum2("leave", "team"),
+    available,
+    burned,
+    availableAhead,
+    leaveAhead: sum2("leaveAhead", "active"),
+    capacityUsedPct: available > EPS ? r22(burned / available) : 0,
+    windowDonePct: workTaken > EPS ? r22(workDone / workTaken) : 0,
+    workDone,
+    workTaken,
+    deliveredToday,
+    team: teamIds.size,
+    progressFrom: ps,
+    workDonePct: estimate > EPS ? r22(delivered / estimate) : 0,
+    delivered,
+    estimate,
+    carriedIn,
+    firstWorkDate,
+    utilisation: util,
+    band: b,
+    pace: rate ? { rate: r22(rate), capacityNeeded: r22(totals.remaining / rate) } : null,
+    finish,
+    lateDays,
+    pooledFinish,
+    status: finish === "never" || (lateDays ?? 0) > 0 ? "red" : b,
+    people: people3,
+    unassigned: { remaining: r22(unassigned.reduce((s, t) => s + remainingOf(t), 0)), tickets: unassigned.length },
+    epics: epicResults,
+    ticketFinish,
+    forecastLog: new Map([...workers].map(([id, w]) => [id, w.log]))
+  };
+}
+var normName = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+function matchPerson(a, people3, manual) {
+  if (manual[a.accountId] && people3.some((p) => p.id === manual[a.accountId])) return { id: manual[a.accountId], how: "manual" };
+  if (a.email) {
+    const m = people3.find((p) => p.email && p.email.toLowerCase() === a.email.toLowerCase());
+    if (m) return { id: m.id, how: "email" };
+  }
+  if (a.name) {
+    const n2 = normName(a.name);
+    const ms = people3.filter((p) => normName(p.displayName) === n2);
+    if (ms.length === 1) return { id: ms[0].id, how: "name" };
+  }
+  return { id: null, how: "none" };
+}
+function sprintParts(name) {
+  const q2 = /q([1-4])/i.exec(name);
+  const n2 = /sprint[\s_-]*(\d{1,2})(?!\d)/i.exec(name);
+  if (!q2 || !n2) return null;
+  const y4 = /(?<!\d)(20\d\d)(?!\d)/.exec(name);
+  const y2 = /q[1-4][\s_-]*(\d{2})(?!\d)/i.exec(name);
+  return { year: y4 ? +y4[1] : y2 ? 2e3 + +y2[1] : null, quarter: +q2[1], num: +n2[1] };
+}
+function mapSprint(s, cal) {
+  if (!s) return null;
+  if (s.id) {
+    const byId = cal.find((c) => Object.values(c.boards ?? {}).some((v) => String(v) === String(s.id)));
+    if (byId) return byId.name;
+  }
+  const norm = (x) => x.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const byName = cal.find((c) => norm(c.name) === norm(s.name));
+  if (byName) return byName.name;
+  const sp = sprintParts(s.name);
+  if (sp) {
+    const hits = cal.filter((c) => {
+      const cp = sprintParts(c.name);
+      return cp && cp.quarter === sp.quarter && cp.num === sp.num && (cp.year === null || sp.year === null || cp.year === sp.year);
+    });
+    if (hits.length === 1) return hits[0].name;
+  }
+  if (s.startDate) {
+    const mid = s.endDate && s.endDate > s.startDate ? addDays(s.startDate, Math.floor(eachDay(s.startDate, s.endDate).length / 2)) : s.startDate;
+    const hit = cal.find((c) => c.startDate <= mid && c.endDate >= mid);
+    if (hit) return hit.name;
+  }
+  return null;
+}
+function sprintBreakdown(p, cal, tickets, personOf, result, day, today2) {
+  const end = result.finish && result.finish !== "never" && result.finish > p.deadline ? result.finish : p.deadline;
+  const span = cal.filter((c) => c.startDate <= end).sort((a, b) => a.startDate.localeCompare(b.startDate));
+  const ids = result.people.map((x) => x.id);
+  const yesterday = addDays(today2, -1);
+  const inSprint = /* @__PURE__ */ new Map();
+  const backlog = [], unmapped = [], unmappedNames = /* @__PURE__ */ new Set();
+  for (const t of tickets) {
+    const m = mapSprint(t.sprint, cal);
+    if (m) {
+      const l = inSprint.get(m);
+      if (l) l.push(t);
+      else inSprint.set(m, [t]);
+    } else if (t.sprint) {
+      unmapped.push(t);
+      unmappedNames.add(t.sprint.name);
+    } else backlog.push(t);
+  }
+  const sprints2 = span.map((c) => {
+    const from = c.startDate;
+    const state3 = c.endDate < today2 ? "past" : c.startDate > today2 ? "future" : "active";
+    const ts = inSprint.get(c.name) ?? [];
+    const wt = workTotals(ts);
+    let working = 0, leave2 = 0, available = 0, elapsed = 0, forecast = 0, forecastOthers = 0, assignedPeople = 0;
+    const people3 = ids.flatMap((id) => {
+      const mine = ts.filter((t) => personOf(t.assigneeId) === id);
+      const assigned = mine.length > 0;
+      const log = result.forecastLog.get(id);
+      let mineForecast = 0;
+      if (log) {
+        for (const [d, w] of log) if (d >= from && d <= c.endDate) mineForecast += w;
+      }
+      if (!assigned && mineForecast <= EPS) return [];
+      const wd = windowDays(id, from, c.endDate, day);
+      const passed = yesterday >= from ? windowDays(id, from, yesterday < c.endDate ? yesterday : c.endDate, day).available : 0;
+      if (assigned) {
+        assignedPeople++;
+        working += wd.working;
+        leave2 += wd.unavailable;
+        available += wd.available;
+        elapsed += passed;
+        forecast += mineForecast;
+      } else forecastOthers += mineForecast;
+      const committed = r22(mine.reduce((s, t) => s + doneOf(t) + remainingOf(t), 0));
+      const remaining = r22(mine.reduce((s, t) => s + remainingOf(t), 0));
+      const done = r22(mine.reduce((s, t) => s + doneOf(t), 0));
+      const u2 = state3 === "active" ? utilisation(remaining, windowDays(id, today2 > from ? today2 : from, c.endDate, day).available) : utilisation(committed, wd.available);
+      return [{
+        id,
+        working: wd.working,
+        leave: wd.unavailable,
+        leaveDates: leaveDates(id, from, c.endDate, day),
+        available: wd.available,
+        elapsed: passed,
+        committed,
+        remaining,
+        done,
+        forecast: r22(mineForecast),
+        burnedPct: wd.available > EPS ? r22(done / wd.available) : 0,
+        utilisation: u2,
+        band: band(u2),
+        assigned
+      }];
+    });
+    const ahead = state3 === "active" ? r22(available - elapsed) : available;
+    const u = state3 === "active" ? utilisation(wt.remaining, ahead) : utilisation(wt.current, available);
+    const burnedPct = available > EPS ? r22(wt.done / available) : 0;
+    const elapsedPct = available > EPS ? r22(elapsed / available) : 0;
+    const pace = state3 !== "active" || !wt.tickets || elapsed <= EPS ? null : burnedPct < elapsedPct - 0.1 ? "behind" : burnedPct > elapsedPct + 0.1 ? "ahead" : "on-pace";
+    return {
+      name: c.name,
+      startDate: from,
+      endDate: c.endDate,
+      state: state3,
+      working,
+      leave: r22(leave2),
+      available: r22(available),
+      elapsed: r22(elapsed),
+      elapsedPct,
+      burnedPct,
+      pace,
+      committed: wt.current,
+      done: wt.done,
+      remaining: wt.remaining,
+      tickets: wt.tickets,
+      open: wt.open,
+      forecast: r22(forecast),
+      forecastOthers: r22(forecastOthers),
+      assignedPeople,
+      utilisation: u,
+      band: band(u),
+      forecastUtilisation: utilisation(forecast, state3 === "active" ? ahead : available),
+      afterDeadline: c.startDate > p.deadline,
+      beforeStart: c.endDate < p.startDate,
+      people: people3
+    };
+  });
+  const rem = (ts) => r22(ts.reduce((s, t) => s + remainingOf(t), 0));
+  return {
+    sprints: sprints2,
+    backlog: { remaining: rem(backlog), tickets: backlog.filter((t) => !t.done).length },
+    unmapped: { remaining: rem(unmapped), tickets: unmapped.filter((t) => !t.done).length, names: [...unmappedNames] }
+  };
+}
+function withCalendarDates(tickets, cal) {
+  return tickets.map((t) => {
+    if (!t.sprint || t.sprint.startDate && t.sprint.endDate) return t;
+    const c = cal.find((x) => x.name === mapSprint(t.sprint, cal));
+    return c ? { ...t, sprint: { ...t.sprint, startDate: t.sprint.startDate ?? c.startDate, endDate: t.sprint.endDate ?? c.endDate } } : t;
+  });
+}
+function baselineOf(snap, epics, tickets) {
+  const fetched = snap.estimateDays !== void 0 || epics.some((e) => e.estimateDays !== void 0);
+  const epicSum = epics.some((e) => e.estimateDays != null) ? Math.round(epics.reduce((a, e) => a + (e.estimateDays ?? 0), 0) * 100) / 100 : null;
+  const days3 = snap.estimateDays ?? epicSum;
+  const source = snap.estimateDays != null ? "project" : epicSum != null ? "epics" : null;
+  const growth = days3 != null ? Math.round((tickets - days3) * 100) / 100 : null;
+  return { days: days3, source, epicSum, tickets, growth, growthPct: days3 ? Math.round((tickets - days3) / days3 * 1e3) / 1e3 : null, fetched };
+}
+var qOrder = (a, b) => a.slice(3).localeCompare(b.slice(3)) || a.localeCompare(b);
+function sprintQuarter(s) {
+  if (!s) return null;
+  const p = sprintParts(s.name);
+  const y = p?.year ?? (s.startDate ? +s.startDate.slice(0, 4) : null);
+  if (p && y) return `Q${p.quarter}-${y}`;
+  if (s.startDate) return `Q${Math.floor((+s.startDate.slice(5, 7) - 1) / 3) + 1}-${s.startDate.slice(0, 4)}`;
+  return null;
+}
+function quarterTotals(epics, tickets) {
+  if (!epics.some((e) => e.quarters?.length)) return [];
+  const qsOf = new Map(epics.map((e) => [e.key, e.quarters ?? []]));
+  const by = /* @__PURE__ */ new Map();
+  const at = (q2) => {
+    let x = by.get(q2);
+    if (!x) by.set(q2, x = { quarter: q2, epics: [], tickets: 0, estimate: 0, done: 0, remaining: 0 });
+    return x;
+  };
+  for (const e of epics) for (const q2 of e.quarters?.length ? e.quarters : [null]) {
+    const x = at(q2);
+    if (!x.epics.includes(e.key)) x.epics.push(e.key);
+  }
+  for (const t of tickets) {
+    const qs = qsOf.get(t.epicKey) ?? [];
+    const sq = sprintQuarter(t.sprint);
+    const q2 = !qs.length ? null : qs.length === 1 ? qs[0] : sq && qs.includes(sq) ? sq : qs[qs.length - 1];
+    const x = at(q2);
+    x.tickets++;
+    x.done += doneOf(t);
+    x.remaining += remainingOf(t);
+  }
+  return [...by.values()].map((x) => ({ ...x, done: r22(x.done), remaining: r22(x.remaining), estimate: r22(x.done + x.remaining) })).filter((x) => x.tickets > 0 || x.quarter !== null).sort((a, b) => a.quarter === null ? 1 : b.quarter === null ? -1 : qOrder(a.quarter, b.quarter));
+}
+function closeWithEpics(epics, tickets) {
+  const closed = new Set(epics.filter((e) => e.done).map((e) => e.key));
+  const doneStory = new Set(tickets.filter((t) => t.done && !t.subtask).map((t) => t.key));
+  return tickets.map((t) => {
+    if (t.done) return t;
+    if (closed.has(t.epicKey)) return { ...t, closedWithEpic: true, closedBy: "epic" };
+    if (t.subtask && t.parentKey && doneStory.has(t.parentKey)) return { ...t, closedWithEpic: true, closedBy: "story" };
+    return t;
+  });
+}
+function closedOutByEpic(tickets) {
+  const m = /* @__PURE__ */ new Map();
+  for (const t of tickets) {
+    if (!t.closedWithEpic) continue;
+    const x = m.get(t.epicKey) ?? { tickets: 0, days: 0, keys: [], subtasks: 0, parents: [] };
+    x.tickets++;
+    x.days = r22(x.days + Math.max(0, t.remainingDays ?? t.originalDays ?? 0));
+    x.keys.push(t.key);
+    if (t.subtask) x.subtasks++;
+    if (t.subtask && t.parentKey && !x.parents.includes(t.parentKey)) x.parents.push(t.parentKey);
+    m.set(t.epicKey, x);
+  }
+  return m;
+}
+var SPRINT_SCHEDULABLE_DAYS = 8;
+var weekdays = (from, to) => to >= from ? eachDay(from, to).filter((d) => !isWeekend(d)).length : 0;
+function schedulable(available, from, to, sprintStart, sprintEnd, cap = SPRINT_SCHEDULABLE_DAYS) {
+  const all2 = weekdays(sprintStart, sprintEnd);
+  const part = weekdays(from, to);
+  const limit = all2 > 0 ? cap * part / all2 : 0;
+  return r22(Math.max(0, Math.min(available, limit)));
+}
+
+// ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/domain/allocation.ts
+function itemsOf(ts) {
+  const by = /* @__PURE__ */ new Map();
+  for (const t of ts) {
+    let it = by.get(t.epicKey);
+    if (!it) by.set(t.epicKey, it = { epicKey: t.epicKey, jira: 0, done: 0, remaining: 0, tickets: 0, open: 0 });
+    it.done += doneOf(t);
+    it.remaining += remainingOf(t);
+    it.tickets++;
+    if (!t.done) it.open++;
+  }
+  return [...by.values()].map((i) => ({ ...i, done: r22(i.done), remaining: r22(i.remaining), jira: r22(i.done + i.remaining) })).sort((a, b) => b.jira - a.jira || a.epicKey.localeCompare(b.epicKey));
+}
+var sum = (xs, k) => r22(xs.reduce((s, x) => s + x[k], 0));
+function allocation(sources, cal, personOf, day, today2, until) {
+  const tickets = /* @__PURE__ */ new Map();
+  const epics = /* @__PURE__ */ new Map();
+  for (const s of sources) {
+    for (const e of s.epics) {
+      const x = epics.get(e.key);
+      if (x) {
+        if (!x.projects.some((p) => p.id === s.projectId)) x.projects.push({ id: s.projectId, name: s.projectName });
+      } else epics.set(e.key, { key: e.key, summary: e.summary, status: e.status, done: e.done, projects: [{ id: s.projectId, name: s.projectName }] });
+    }
+    for (const t of s.tickets) if (!tickets.has(t.key)) tickets.set(t.key, t);
+  }
+  const sorted = [...cal].sort((a, b) => a.startDate.localeCompare(b.startDate));
+  const placed = /* @__PURE__ */ new Map();
+  let end = until;
+  for (const t of tickets.values()) {
+    const m = mapSprint(t.sprint, sorted);
+    placed.set(t.key, m);
+    const c = m ? sorted.find((x) => x.name === m) : null;
+    if (c && !t.done && c.startDate > end) end = c.startDate;
+  }
+  const span = sorted.filter((c) => c.startDate <= end);
+  const idx = new Map(span.map((c, i) => [c.name, i]));
+  const byPerson = /* @__PURE__ */ new Map();
+  const unassigned = span.map(() => []);
+  const unBacklog = [];
+  for (const t of tickets.values()) {
+    const m = placed.get(t.key);
+    const i = m != null && idx.has(m) ? idx.get(m) : -1;
+    if (i < 0 && t.done) continue;
+    const id = personOf(t.assigneeId);
+    if (!id) {
+      (i < 0 ? unBacklog : unassigned[i]).push(t);
+      continue;
+    }
+    let pm = byPerson.get(id);
+    if (!pm) byPerson.set(id, pm = /* @__PURE__ */ new Map());
+    const l = pm.get(i);
+    if (l) l.push(t);
+    else pm.set(i, [t]);
+  }
+  const people3 = [...byPerson].map(([id, pm]) => {
+    const cells = span.map((c, i) => {
+      const w = windowDays(id, c.startDate, c.endDate, day);
+      const items = itemsOf(pm.get(i) ?? []);
+      const jira = sum(items, "jira"), remaining = sum(items, "remaining");
+      const active = c.startDate <= today2 && c.endDate >= today2;
+      const ahead = active ? windowDays(id, today2, c.endDate, day).available : null;
+      const load2 = utilisation(jira, w.available);
+      return {
+        working: w.working,
+        leave: w.unavailable,
+        available: w.available,
+        leaveDates: leaveDates(id, c.startDate, c.endDate, day),
+        jira,
+        done: sum(items, "done"),
+        remaining,
+        tickets: sum(items, "tickets"),
+        open: sum(items, "open"),
+        load: load2,
+        band: band(load2),
+        availableAhead: ahead,
+        loadAhead: ahead === null ? null : utilisation(remaining, ahead),
+        items
+      };
+    });
+    const backlogItems = itemsOf(pm.get(-1) ?? []);
+    const total = /* @__PURE__ */ new Map();
+    for (const c of cells) for (const it of c.items) total.set(it.epicKey, (total.get(it.epicKey) ?? 0) + it.jira);
+    for (const it of backlogItems) total.set(it.epicKey, (total.get(it.epicKey) ?? 0) + it.remaining);
+    const mine = [...total].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([k]) => k);
+    const projects2 = [...new Set(mine.flatMap((k) => epics.get(k)?.projects.map((p) => p.id) ?? []))];
+    return {
+      id,
+      cells,
+      backlog: { remaining: sum(backlogItems, "remaining"), tickets: sum(backlogItems, "open"), items: backlogItems },
+      epics: mine,
+      projects: projects2
+    };
+  });
+  const rem = (ts) => r22(ts.reduce((s, t) => s + remainingOf(t), 0));
+  return {
+    sprints: span.map((c) => ({
+      name: c.name,
+      startDate: c.startDate,
+      endDate: c.endDate,
+      state: c.endDate < today2 ? "past" : c.startDate > today2 ? "future" : "active"
+    })),
+    people: people3,
+    epics: [...epics.values()],
+    unassigned: unassigned.map((ts) => ({ jira: r22(ts.reduce((s, t) => s + doneOf(t) + remainingOf(t), 0)), remaining: rem(ts), tickets: ts.length })),
+    unassignedBacklog: { remaining: rem(unBacklog), tickets: unBacklog.filter((t) => !t.done).length }
+  };
+}
+
+// ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/domain/forecastReport.ts
+var DAY_SECONDS = 21600;
+var GREEN_PCT = 80;
+var AMBER_PCT = 100;
+var CANCELLED = /* @__PURE__ */ new Set([
+  "duplicate",
+  "won't do",
+  "wont do",
+  "won\u2019t do",
+  "won't fix",
+  "wont fix",
+  "cannot reproduce",
+  "obsolete",
+  "rejected",
+  "declined",
+  "not a bug",
+  "invalid"
+]);
+var isCancelled = (t) => t.closedWithEpic === true || t.done && CANCELLED.has((t.resolution ?? "").trim().toLowerCase());
+function ticketState(t) {
+  if (isCancelled(t)) return "cancelled";
+  if (t.done) return "done";
+  return /review/i.test(t.status) ? "review" : "open";
+}
+var LETTER = { open: "o", review: "r", done: "d", cancelled: "c" };
+var FROM_LETTER = { o: "open", r: "review", d: "done", c: "cancelled" };
+function r1(x) {
+  const v = Math.round(x * 1e6) / 1e6;
+  const s = Math.sign(v) * Math.round(Math.abs(v) * 10 + 1e-9) / 10;
+  return s.toFixed(1);
+}
+var fmt2 = (x, zero = "0") => x === null ? "\u2013" : Math.abs(x) < 0.05 ? zero : r1(x);
+var signed = (x) => Math.abs(x) < 0.05 ? "0" : (x > 0 ? "+" : "\u2212") + r1(Math.abs(x));
+var num = (x) => String(Math.round(x * 1e6) / 1e6);
+var icon = (p) => p <= GREEN_PCT ? "\u{1F7E2}" : p <= AMBER_PCT ? "\u{1F7E0}" : "\u{1F534}";
+var pyRound = (x) => {
+  const f = Math.floor(x), d = x - f;
+  return d > 0.5 ? f + 1 : d < 0.5 ? f : f % 2 === 0 ? f : f + 1;
+};
+var pctIcon = (p) => `${icon(p)} ${pyRound(p)}%`;
+var keySort = (a, b) => {
+  const [pa, na] = [a.slice(0, a.lastIndexOf("-")), +a.slice(a.lastIndexOf("-") + 1) || 0];
+  const [pb, nb] = [b.slice(0, b.lastIndexOf("-")), +b.slice(b.lastIndexOf("-") + 1) || 0];
+  return pa.localeCompare(pb) || na - nb;
+};
+function shortKeys(keys) {
+  let prefix = null;
+  return keys.map((k) => {
+    const i = k.lastIndexOf("-");
+    const p = k.slice(0, i);
+    const out = p === prefix ? k.slice(i + 1) : k;
+    prefix = p;
+    return out;
+  }).join(", ");
+}
+var sprintLabel = (name) => /sprint\s*\d+/i.exec(name)?.[0].replace(/sprint\s*/i, "Sprint ") ?? name;
+function buildReport(args) {
+  const { epics, tickets, sprints: sprints2, cal, prev } = args;
+  const D = DAY_SECONDS;
+  const names = sprints2.map((s) => s.name);
+  const epicSet = new Set(epics.map((e) => e.key));
+  const bucket = (t) => {
+    let best = -1, current = false, later = false;
+    for (const s of t.sprints?.length ? t.sprints : t.sprint ? [t.sprint] : []) {
+      const i = names.indexOf(mapSprint(s, cal) ?? "");
+      if (i >= 0) best = Math.max(best, i);
+      else if (s.state === "active") current = true;
+      else if (s.state === "future") later = true;
+    }
+    return best >= 0 ? best : current && names.length ? 0 : later ? "later" : "none";
+  };
+  const rows = new Map(epics.map((e) => [e.key, { key: e.key, label: e.summary || e.key, est: 0, done: 0, review: 0, rem: 0, unest: 0 }]));
+  const load2 = sprints2.map(() => 0);
+  let noneRem = 0, laterRem = 0;
+  const loadByPerson = {};
+  const personLoad = (t) => {
+    const id = (args.personOf ? args.personOf(t.assigneeId) : t.assigneeId) ?? "";
+    return loadByPerson[id] ??= { sprints: sprints2.map(() => 0), none: 0 };
+  };
+  const snap = {};
+  const warnings = [];
+  for (const t of tickets) {
+    if (!epicSet.has(t.epicKey)) continue;
+    const origSec = t.origSec !== void 0 ? t.origSec : t.originalDays === null ? null : t.originalDays * D;
+    const remSec = t.remSec !== void 0 ? t.remSec : t.remainingDays === null ? null : t.remainingDays * D;
+    const o = (origSec ?? 0) / D, r = (remSec ?? 0) / D;
+    const state3 = ticketState(t);
+    snap[t.key] = { orig: origSec, rem: remSec, state: state3 };
+    if (state3 === "cancelled") continue;
+    const R = rows.get(t.epicKey);
+    R.est += o;
+    if (state3 === "done") {
+      R.done += o;
+      continue;
+    }
+    if (state3 === "review") {
+      R.review += o;
+      continue;
+    }
+    if (origSec === null) R.unest++;
+    R.rem += r;
+    const b = bucket(t);
+    const pl = personLoad(t);
+    if (b === "none") {
+      noneRem += r;
+      pl.none += r;
+    } else if (b === "later") {
+      laterRem += r;
+      pl.none += r;
+    } else {
+      load2[b] += r;
+      pl.sprints[b] += r;
+    }
+  }
+  if (laterRem > 0.05) {
+    warnings.push(`${r1(laterRem)} d of remaining work sits in sprints after the deadline; it is counted under 'Not in a sprint'.`);
+    noneRem += laterRem;
+  }
+  const total = { key: "", label: "Total", est: 0, done: 0, review: 0, rem: 0, unest: 0 };
+  for (const R of rows.values()) {
+    total.est += R.est;
+    total.done += R.done;
+    total.review += R.review;
+    total.rem += R.rem;
+    total.unest += R.unest;
+  }
+  const caps = sprints2.map((s) => s.capacity);
+  const totalCap = caps.reduce((a, b) => a + b, 0);
+  const totalRem = total.rem;
+  const nFuture = sprints2.length - 1;
+  const needed = sprints2.length ? [load2[0], ...Array(Math.max(0, nFuture)).fill(nFuture ? (totalRem - load2[0]) / nFuture : 0)] : [];
+  const sprintRows = sprints2.map((s, i) => ({ ...s, loaded: load2[i], needed: needed[i], utilisation: caps[i] ? 100 * needed[i] / caps[i] : null }));
+  const totalUtil = totalCap ? 100 * totalRem / totalCap : null;
+  let changes = null;
+  if (prev) {
+    const P = {};
+    for (const [k, v] of Object.entries(prev.t)) P[k] = { orig: v[0], rem: v[1], state: FROM_LETTER[v[2]] ?? "open" };
+    const counted = (x) => x && x.state === "open" ? (x.rem ?? 0) / D : 0;
+    const prevTotal = prev.rt !== null && Number.isFinite(prev.rt) ? prev.rt : Object.values(P).reduce((s, x) => s + counted(x), 0);
+    const newlyEst = [], unestClosed = [], estClosed = [], reest = [];
+    const delivered = [], reviewMoves = [], burn = [], added = [], removed = [];
+    for (const k of [.../* @__PURE__ */ new Set([...Object.keys(P), ...Object.keys(snap)])].sort(keySort)) {
+      const p = P[k], c = snap[k];
+      if (p && !c) {
+        removed.push({ k, d: -counted(p) });
+        continue;
+      }
+      if (c && !p) {
+        added.push({ k, d: counted(c) });
+        continue;
+      }
+      const d = counted(c) - counted(p);
+      if (p.state === "open" && p.orig === null) {
+        if (c.state === "cancelled") unestClosed.push({ k, d });
+        else if (c.orig !== null) newlyEst.push({ k, d });
+        else if (Math.abs(d) > 1e-3) burn.push({ k, d });
+        continue;
+      }
+      if (c.state === "cancelled" && p.state !== "cancelled") {
+        estClosed.push({ k, d, o: (p.orig ?? 0) / D });
+        continue;
+      }
+      if (c.state === "done" && (p.state === "open" || p.state === "review")) {
+        delivered.push({ k, d });
+        continue;
+      }
+      if (p.state === "open" !== (c.state === "open")) {
+        reviewMoves.push({ k, d });
+        continue;
+      }
+      if (p.orig !== c.orig && c.state === "open") {
+        reest.push({ k, d, o: (p.orig ?? 0) / D, c: (c.orig ?? 0) / D });
+        continue;
+      }
+      if (Math.abs(d) > 1e-3) burn.push({ k, d });
+    }
+    const sum2 = (xs) => xs.reduce((s, x) => s + x.d, 0);
+    const keysOf = (xs) => xs.length ? ` (${shortKeys(xs.map((x) => x.k))})` : "";
+    const out = [
+      { label: "Previously unestimated tickets that now have estimates", count: newlyEst.length, keys: "", effect: sum2(newlyEst), standard: true },
+      { label: "Previously unestimated tickets closed as Duplicate or Won\u2019t Do", count: unestClosed.length, keys: keysOf(unestClosed), effect: sum2(unestClosed), standard: true },
+      {
+        label: "Estimated tickets closed as Duplicate or Won\u2019t Do",
+        count: estClosed.length,
+        keys: estClosed.length ? " (" + estClosed.map((x) => `${x.k} ${num(x.o)} d`).join(", ") + ")" : "",
+        effect: sum2(estClosed),
+        standard: true
+      },
+      {
+        label: "Re-estimates on existing tickets",
+        count: reest.length,
+        keys: reest.map((x) => `${x.k} ${num(x.o)}\u2192${num(x.c)}`).join(", "),
+        effect: sum2(reest),
+        standard: true
+      }
+    ];
+    for (const [label, xs] of [
+      ["Tickets delivered", delivered],
+      ["Tickets moved into or out of review", reviewMoves],
+      ["Remaining burned on in-progress tickets", burn],
+      ["New tickets added to the epics", added],
+      ["Tickets moved out of the epics", removed]
+    ]) {
+      if (xs.length) out.push({ label, count: xs.length, keys: keysOf(xs), effect: sum2(xs), standard: false });
+    }
+    const explained = [newlyEst, unestClosed, estClosed, reest, delivered, reviewMoves, burn, added, removed].reduce((s, xs) => s + sum2(xs), 0);
+    const gap = totalRem - prevTotal - explained;
+    if (Math.abs(gap) > 0.05) out.push({ label: "Other / unexplained", count: 0, keys: "", effect: gap, standard: false });
+    changes = { rows: out, prevTotal, prevDate: prev.date };
+  }
+  const snapshot = {
+    skill: "epic-capacity-forecast",
+    project: args.project,
+    date: args.date,
+    rt: Math.round(totalRem * 100) / 100,
+    t: Object.fromEntries(Object.keys(snap).sort(keySort).map((k) => [k, [snap[k].orig, snap[k].rem, LETTER[snap[k].state]]]))
+  };
+  const L = [];
+  L.push("## Epic status (ticket level)\n");
+  L.push("| Epic | Estimate, active (d) | Delivered (d) | In review (d) | Remaining (d) | Done % | Unestimated |");
+  L.push("|---|---|---|---|---|---|---|");
+  const erow = (R, bold = false) => {
+    const pct = R.est ? `${pyRound(100 * R.done / R.est)}%` : "\u2013";
+    let cells = [R.label, fmt2(R.est), fmt2(R.done, "\u2013"), fmt2(R.review, "\u2013"), fmt2(R.rem), pct, String(R.unest)];
+    if (bold) cells = cells.map((c) => `**${c}**`);
+    L.push("| " + cells.join(" | ") + " |");
+  };
+  for (const R of rows.values()) erow(R);
+  erow(total, true);
+  L.push("\n## Remaining work vs capacity\n");
+  const hdr = ["", ...sprints2.map((s) => `${s.label} (${num(s.days)} d)`), "Not in a sprint", "Total"];
+  L.push("| " + hdr.join(" | ") + " |");
+  L.push("|" + "---|".repeat(hdr.length));
+  L.push("| " + [`Capacity, ${args.engineers} engineers (d)`, ...caps.map(num), "\u2013", num(totalCap)].join(" | ") + " |");
+  L.push("| " + ["Loaded or scheduled (d)", ...load2.map((x) => fmt2(x)), fmt2(noneRem), fmt2(totalRem)].join(" | ") + " |");
+  L.push("| " + ["Needed to finish (d)", ...needed.map((x) => fmt2(x)), "\u2013", fmt2(totalRem)].join(" | ") + " |");
+  L.push("| " + ["Utilisation", ...sprintRows.map((s) => s.utilisation === null ? "\u2013" : pctIcon(s.utilisation)), "", totalUtil === null ? "\u2013" : pctIcon(totalUtil)].join(" | ") + " |");
+  L.push("\n## What changed since the last run\n");
+  if (!changes) L.push("No previous snapshot found, so this run is the baseline. The change table will appear from the next run.");
+  else {
+    L.push("| Change | Tickets | Effect on remaining (d) |");
+    L.push("|---|---|---|");
+    for (const c of changes.rows) {
+      const tickets2 = c.label.startsWith("Re-estimates") ? c.keys || "\u2013" : c.label === "Other / unexplained" ? "\u2013" : c.label.startsWith("Previously unestimated tickets that now") ? String(c.count) : `${c.count}${c.keys}`;
+      L.push(`| ${c.label} | ${tickets2} | ${signed(c.effect)} |`);
+    }
+    L.push(`| **Net** | | **${r1(changes.prevTotal)} \u2192 ${r1(totalRem)}** |`);
+  }
+  for (const w of warnings) L.push(`
+> ${w}`);
+  return {
+    epics: [...rows.values()],
+    total,
+    sprints: sprintRows,
+    notInSprint: noneRem,
+    engineers: args.engineers,
+    totalCapacity: totalCap,
+    totalRemaining: totalRem,
+    totalUtilisation: totalUtil,
+    changes,
+    loadByPerson,
+    warnings,
+    snapshot,
+    markdown: L.join("\n") + "\n"
+  };
+}
+function parseSnapshot(text) {
+  let j;
+  try {
+    j = JSON.parse(String(text).trim().replace(/^```(?:json)?\s*|\s*```$/g, ""));
+  } catch {
+    throw new Error("That isn\u2019t valid JSON. Paste the whole \u201CSnapshot for next run\u201D block.");
+  }
+  if (!j || typeof j.t !== "object" || Array.isArray(j.t)) throw new Error("No ticket list (\u201Ct\u201D) in that snapshot.");
+  const t = {};
+  for (const [k, v] of Object.entries(j.t)) {
+    if (!Array.isArray(v) || v.length < 3 || !FROM_LETTER[String(v[2])]) throw new Error(`Ticket ${k} isn\u2019t in the snapshot format.`);
+    t[k] = [typeof v[0] === "number" ? v[0] : null, typeof v[1] === "number" ? v[1] : null, String(v[2])];
+  }
+  const date2 = typeof j.date === "string" && /^\d{4}-\d{2}-\d{2}/.test(j.date) ? j.date.slice(0, 10) : "";
+  if (!date2) throw new Error("The snapshot has no date.");
+  return { skill: j.skill, project: j.project ?? null, date: date2, rt: typeof j.rt === "number" && Number.isFinite(j.rt) ? j.rt : null, t };
+}
+
 // ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/domain/longleave.ts
 var UNSCHEDULED_RE = /\bsick|substitut/i;
 var countsAsLongLeave = (typeName) => !isWfhType(typeName) && !UNSCHEDULED_RE.test(typeName || "");
 var LONG_DAYS = 10;
 var MINI_DAYS = 5;
-function findRuns(recs, days2, isHoliday) {
+function findRuns(recs, days3, isHoliday) {
   const byId = new Map(recs.map((r) => [r.id, r]));
   const perPerson = /* @__PURE__ */ new Map();
-  for (const d of days2) {
+  for (const d of days3) {
     const r = byId.get(d.requestId);
     if (!r || !isActive(r.status) || !countsAsLongLeave(r.typeName) || d.fraction <= 0) continue;
     const m = perPerson.get(d.employeeId) ?? /* @__PURE__ */ new Map();
@@ -1478,6 +2367,7 @@ function mapEmployees(json, t = today()) {
       // supervisorEId = the manager's employee id; supervisorId is their
       // employee NUMBER in some tenants, so it is only a fallback (verify)
       reportsToId: str(e.supervisorEId) ?? str(e.supervisorId) ?? null,
+      workEmail: str(e.workEmail) ?? null,
       active: isActiveEmployee(e, t),
       inScope: false
     });
@@ -1529,12 +2419,12 @@ function expandDays(req, dates, isHoliday, hoursPerDay = 8) {
     for (const day of Object.keys(dates).sort()) push(day, toFraction(dates[day]));
     return rows;
   }
-  const days2 = eachDay(req.startDate, req.endDate);
-  if (days2.length === 1 && req.amount !== null && req.amount > 0) {
-    push(days2[0], toFraction(req.amount));
+  const days3 = eachDay(req.startDate, req.endDate);
+  if (days3.length === 1 && req.amount !== null && req.amount > 0) {
+    push(days3[0], toFraction(req.amount));
     return rows;
   }
-  for (const day of days2) push(day, 1);
+  for (const day of days3) push(day, 1);
   return rows;
 }
 function mapHolidays(json) {
@@ -1650,6 +2540,22 @@ async function setSlackWebhook(app, url) {
 async function clearAll(app, team) {
   await Promise.all([app.secrets.delete(n(KEY, team)), app.secrets.delete(n(DOMAIN, team))]);
 }
+var JIRA_SITE = "jira.site";
+var JIRA_EMAIL = "jira.email";
+var JIRA_TOKEN = "jira.apiToken";
+async function getJira(app) {
+  const [site, email, token] = await Promise.all([app.secrets.get(JIRA_SITE), app.secrets.get(JIRA_EMAIL), app.secrets.get(JIRA_TOKEN)]);
+  return site && email && token ? { site, email, token } : null;
+}
+async function setJira(app, v) {
+  if (!v) {
+    await Promise.all([JIRA_SITE, JIRA_EMAIL, JIRA_TOKEN].map((k) => app.secrets.delete(k)));
+    return;
+  }
+  await app.secrets.set(JIRA_SITE, v.site);
+  await app.secrets.set(JIRA_EMAIL, v.email);
+  await app.secrets.set(JIRA_TOKEN, v.token);
+}
 
 // ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/sync/orgTree.ts
 function childrenMap(employees) {
@@ -1682,7 +2588,7 @@ function markScope(employees, rootId) {
 // ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/sync/scheduler.ts
 var SYNC_EVERY_MS = 15 * 6e4;
 var DAILY_MS = 24 * 36e5;
-var REPORT_FIELDS = ["id", "displayName", "firstName", "lastName", "location", "supervisorEId", "supervisorId", "status", "terminationDate"];
+var REPORT_FIELDS = ["id", "displayName", "firstName", "lastName", "location", "supervisorEId", "supervisorId", "status", "terminationDate", "workEmail"];
 var running = null;
 var timer2 = null;
 var lastError = null;
@@ -1741,7 +2647,7 @@ async function syncTeam(team, client, demo, full, demoRoot) {
       if (!myId) throw new Error("BambooHR did not return your employee id");
       let raw2;
       try {
-        raw2 = await client.post("reports/custom", { title: "Leave Radar", fields: REPORT_FIELDS }, { format: "JSON", onlyCurrent: "true" });
+        raw2 = await client.post("reports/custom", { title: "Capacity Radar", fields: REPORT_FIELDS }, { format: "JSON", onlyCurrent: "true" });
       } catch {
         raw2 = await client.get("employees/directory");
       }
@@ -1767,19 +2673,19 @@ async function syncTeam(team, client, demo, full, demoRoot) {
       end: to,
       status: "approved,requested,denied,canceled,superceded"
     });
-    const scoped = new Map(teamMembers(team.id).map((e) => [e.id, e.location]));
+    const scoped2 = new Map(teamMembers(team.id).map((e) => [e.id, e.location]));
     const hol = holidayIndex(holidays(from, to));
     const hoursPerDay = getSetting("hoursPerDay", 8);
     const rows = [];
-    const days2 = [];
+    const days3 = [];
     for (const r of Array.isArray(raw) ? raw : []) {
       const row = mapRequest(r, at);
-      if (!row || !scoped.has(row.employeeId)) continue;
+      if (!row || !scoped2.has(row.employeeId)) continue;
       rows.push(row);
-      const loc = scoped.get(row.employeeId);
-      days2.push(...expandDays(row, requestDates(r), (d) => hol(d, loc), hoursPerDay));
+      const loc = scoped2.get(row.employeeId);
+      days3.push(...expandDays(row, requestDates(r), (d) => hol(d, loc), hoursPerDay));
     }
-    replaceRequests(rows, days2, from, to, from, team.id);
+    replaceRequests(rows, days3, from, to, from, team.id);
     logSync(at, true, rows.length, null, Date.now() - t0);
     return null;
   } catch (e) {
@@ -1822,7 +2728,7 @@ function normalize(f) {
   if (to < from) [from, to] = [to, from];
   if (diffDays(from, to) > MAX_SPAN_DAYS) to = addDays(from, MAX_SPAN_DAYS);
   const arr = (v) => Array.isArray(v) ? v.map(String).filter(Boolean) : [];
-  const num = (v) => v === null || v === void 0 || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+  const num2 = (v) => v === null || v === void 0 || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
   const statuses = arr(f?.statuses).filter((s) => ["planned", "draft", "denied", "canceled"].includes(s));
   return {
     from,
@@ -1832,12 +2738,12 @@ function normalize(f) {
     people: arr(f?.people),
     teams: arr(f?.teams),
     locations: arr(f?.locations),
-    minDays: num(f?.minDays),
-    maxDays: num(f?.maxDays),
+    minDays: num2(f?.minDays),
+    maxDays: num2(f?.maxDays),
     requestedFrom: isDate(f?.requestedFrom) ? f.requestedFrom : null,
     requestedTo: isDate(f?.requestedTo) ? f.requestedTo : null,
     overlapOnly: !!f?.overlapOnly,
-    overlapMinPeople: num(f?.overlapMinPeople),
+    overlapMinPeople: num2(f?.overlapMinPeople),
     sprint: typeof f?.sprint === "string" ? f.sprint : null
   };
 }
@@ -1856,8 +2762,8 @@ function load(f) {
   const active = (f.statuses ?? DEFAULT_STATUSES).filter(isActive);
   if (!active.length) return [];
   const people3 = people({ teams: f.teams, locations: f.locations });
-  const days2 = days(f.from, f.to, bambooStatusesFor(active)).map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
-  return teamLoad(people3, days2, f.from, f.to, thresholdFor, f.overlapOnly ? f.overlapMinPeople : null);
+  const days3 = days(f.from, f.to, bambooStatusesFor(active)).map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
+  return teamLoad(people3, days3, f.from, f.to, thresholdFor, f.overlapOnly ? f.overlapMinPeople : null);
 }
 function overlapDaySet(f) {
   return new Set(load(f).filter((d) => d.flagged).map((d) => d.day));
@@ -1895,11 +2801,11 @@ function calendar(fIn) {
   const people3 = people(f);
   const dayLoad = load(f);
   const flagged = new Set(dayLoad.filter((d) => d.flagged).map((d) => d.day));
-  let days2 = eachDay(f.from, f.to);
-  if (f.overlapOnly) days2 = days2.filter((d) => flagged.has(d));
-  const col = new Map(days2.map((d, i) => [d, i]));
+  let days3 = eachDay(f.from, f.to);
+  if (f.overlapOnly) days3 = days3.filter((d) => flagged.has(d));
+  const col = new Map(days3.map((d, i) => [d, i]));
   const row = new Map(people3.map((p, i) => [p.id, i]));
-  const cells = people3.map(() => new Array(days2.length).fill(null));
+  const cells = people3.map(() => new Array(days3.length).fill(null));
   for (const d of days(f.from, f.to)) {
     if (!ids.has(d.requestId)) continue;
     const i = row.get(d.employeeId), j = col.get(d.day);
@@ -1911,13 +2817,13 @@ function calendar(fIn) {
       continue;
     }
     const better = RANK[cell.s] > RANK[cur.s] || RANK[cell.s] === RANK[cur.s] && cur.w === 1 && cell.w === 0;
-    const sum = Math.min(1, cur.f + cell.f);
-    if (better) cells[i][j] = cur.s === cell.s ? { ...cell, f: sum } : cell;
-    else if (cur.s === cell.s) cells[i][j] = { ...cur, f: sum };
+    const sum2 = Math.min(1, cur.f + cell.f);
+    if (better) cells[i][j] = cur.s === cell.s ? { ...cell, f: sum2 } : cell;
+    else if (cur.s === cell.s) cells[i][j] = { ...cur, f: sum2 };
   }
   return {
     people: people3,
-    days: days2,
+    days: days3,
     cells,
     holidays: holidays(f.from, f.to),
     load: dayLoad.filter((d) => col.has(d.day)),
@@ -1939,8 +2845,8 @@ function onLeaveIn(rows, from, to, who) {
     if (!x.url) x.url = linkFor(d.employeeId, d.requestId);
     m.set(d.employeeId, x);
   }
-  const r22 = (n2) => Math.round(n2 * 100) / 100;
-  return [...m.values()].map((x) => ({ ...x, planned: r22(x.planned), draft: r22(x.draft) })).sort((a, b) => b.planned + b.draft - (a.planned + a.draft) || a.person.localeCompare(b.person));
+  const r23 = (n2) => Math.round(n2 * 100) / 100;
+  return [...m.values()].map((x) => ({ ...x, planned: r23(x.planned), draft: r23(x.draft) })).sort((a, b) => b.planned + b.draft - (a.planned + a.draft) || a.person.localeCompare(b.person));
 }
 function capacity(fIn, sprintName, byMonth = false) {
   const f = normalize(fIn);
@@ -1953,14 +2859,14 @@ function capacity(fIn, sprintName, byMonth = false) {
   const reqType = /* @__PURE__ */ new Map();
   if (typeSet) for (const r of requests({ ...f, from: lo, to: hi, statuses: ["planned", "draft"], people: [], types: [] })) reqType.set(r.id, r.typeId);
   const rawDays = days(lo, hi, ["approved", "requested"]).filter((d) => !typeSet || typeSet.has(reqType.get(d.requestId) ?? ""));
-  const days2 = rawDays.map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
+  const days3 = rawDays.map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
   const hol = holidayIndex(holidays(lo, hi));
   const who = new Map(people3.map((p) => [p.id, { name: p.displayName, team: p.team }]));
   return periods.map((p) => {
     const ld = load({ ...f, from: p.from, to: p.to, statuses: ["planned", "draft"], overlapOnly: false });
     return {
       ...p,
-      teams: capacityByTeam(people3, days2, p.from, p.to, hol).map((t) => ({
+      teams: capacityByTeam(people3, days3, p.from, p.to, hol).map((t) => ({
         ...t,
         threshold: thresholdFor(t.team),
         overlapDays: ld.filter((d) => d.teams.some((x) => x.team === t.team && x.flagged)).length
@@ -1992,12 +2898,12 @@ function quarterCapacity(fIn, year2, q2) {
   const typeSet = f.types?.length ? new Set(f.types) : null;
   const reqType = /* @__PURE__ */ new Map();
   if (typeSet) for (const r of requests({ ...f, from, to, statuses: ["planned", "draft"], people: [], types: [] })) reqType.set(r.id, r.typeId);
-  const days2 = days(from, to, ["approved", "requested"]).filter((d) => !typeSet || typeSet.has(reqType.get(d.requestId) ?? "")).map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
+  const days3 = days(from, to, ["approved", "requested"]).filter((d) => !typeSet || typeSet.has(reqType.get(d.requestId) ?? "")).map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
   const hol = holidayIndex(holidays(from, to));
-  const teams2 = capacityByTeam(people3, days2, from, to, hol);
+  const teams2 = capacityByTeam(people3, days3, from, to, hol);
   const months = [0, 1, 2].map((i) => {
     const mFrom = addMonths(from, i), mTo = addDays(addMonths(from, i + 1), -1);
-    return { month: mFrom.slice(0, 7), from: mFrom, to: mTo, ...capTotals(capacityByTeam(people3, days2, mFrom, mTo, hol)) };
+    return { month: mFrom.slice(0, 7), from: mFrom, to: mTo, ...capTotals(capacityByTeam(people3, days3, mFrom, mTo, hol)) };
   });
   return {
     year: yr,
@@ -2014,9 +2920,9 @@ function overlaps(fIn, threshold) {
   const f = normalize(fIn);
   const active = (f.statuses ?? DEFAULT_STATUSES).filter(isActive);
   const people3 = people({ teams: f.teams, locations: f.locations });
-  const days2 = days(f.from, f.to, bambooStatusesFor(active)).map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
+  const days3 = days(f.from, f.to, bambooStatusesFor(active)).map((d) => ({ employeeId: d.employeeId, day: d.day, fraction: d.fraction, status: appStatus(d.bambooStatus), wfh: isWfhType(d.typeName) }));
   const th = threshold && threshold > 0 ? () => threshold : thresholdFor;
-  return teamLoad(people3, days2, f.from, f.to, th).filter((d) => d.flagged);
+  return teamLoad(people3, days3, f.from, f.to, th).filter((d) => d.flagged);
 }
 function summary(fIn) {
   const f = normalize(fIn);
@@ -2091,8 +2997,8 @@ function longLeave(fIn, y) {
   }));
   const loc = new Map(people().map((p) => [p.id, p.location]));
   const hol = holidayIndex(holidays(from, to));
-  const days2 = days(from, to, ["approved", "requested"]).filter((d) => countsAsLongLeave(d.typeName));
-  const runs = findRuns(recs, days2, (d, emp) => hol(d, loc.get(emp) ?? ""));
+  const days3 = days(from, to, ["approved", "requested"]).filter((d) => countsAsLongLeave(d.typeName));
+  const runs = findRuns(recs, days3, (d, emp) => hol(d, loc.get(emp) ?? ""));
   return longLeaveYear(yr, t, runs, earliestDay());
 }
 function uniqueSprints() {
@@ -2119,7 +3025,7 @@ function digest() {
   const recs = leave({ from: t, to, statuses: ["planned", "draft"] }).filter((r) => r.days > 0);
   const flagged = overlaps({ from: t, to });
   const lines = [];
-  const title = `Leave Radar \u2014 next two weeks (${t} \u2192 ${to})`;
+  const title = `Capacity Radar \u2014 next two weeks (${t} \u2192 ${to})`;
   lines.push(title, "");
   if (!recs.length) lines.push("Nobody is out or has leave pending.");
   const ord = teamOrder();
@@ -2155,6 +3061,534 @@ function monthPeriods(from, to) {
     out.push({ id: m.slice(0, 7), name: `${MONTH_NAMES[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`, from: maxDate(m, from), to: minDate(end, to) });
   }
   return out;
+}
+function dayFn(from, to) {
+  const loc = new Map(people().map((p) => [p.id, p.location]));
+  const hol = holidayIndex(holidays(from, to));
+  const out = /* @__PURE__ */ new Map();
+  for (const d of days(from, to, ["approved"])) {
+    if (isWfhType(d.typeName)) continue;
+    const k = d.employeeId + "|" + d.day;
+    out.set(k, (out.get(k) ?? 0) + d.fraction);
+  }
+  return (id, day) => {
+    if (isWeekend(day)) return { working: false, out: 0 };
+    if (id.startsWith("jira:")) return { working: true, out: 0 };
+    const l = loc.get(id);
+    if (l === void 0 || hol(day, l)) return { working: false, out: 0 };
+    return { working: true, out: out.get(id + "|" + day) ?? 0 };
+  };
+}
+function prevRun(p, today2, compareWith) {
+  const runs = p.runs ?? [];
+  if (compareWith) return runs.find((r) => r.date === compareWith) ?? null;
+  return runs.find((r) => r.date < today2) ?? null;
+}
+function reportSprints(p, cal, engineers, day, today2) {
+  const first = cal.findIndex((c) => c.endDate >= today2);
+  if (first < 0) return { sprints: [], perEngineer: [] };
+  let last = cal.findIndex((c) => c.endDate >= p.deadline);
+  if (last < 0) last = cal.length - 1;
+  const span = cal.slice(first, Math.max(first, last) + 1);
+  const fromOf = (c, i) => i === 0 && today2 > c.startDate ? today2 : c.startDate;
+  const perEngineer = engineers.map((id) => ({
+    id,
+    sprints: span.map((c, i) => {
+      const w = windowDays(id, fromOf(c, i), c.endDate, day);
+      return {
+        working: w.working,
+        leave: w.unavailable,
+        available: w.available,
+        actual: schedulable(w.available, fromOf(c, i), c.endDate, c.startDate, c.endDate),
+        leaveDates: leaveDates(id, fromOf(c, i), c.endDate, day)
+      };
+    })
+  }));
+  const sprints2 = span.map((c, i) => {
+    const per = perEngineer.map((e) => e.sprints[i]);
+    const counts2 = /* @__PURE__ */ new Map();
+    for (const w of per) counts2.set(w.working, (counts2.get(w.working) ?? 0) + 1);
+    const days3 = [...counts2].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0]?.[0] ?? 0;
+    return { name: c.name, label: sprintLabel(c.name), days: days3, capacity: Math.round(per.reduce((s, w) => s + w.available, 0) * 100) / 100 };
+  });
+  return { sprints: sprints2, perEngineer };
+}
+function forecastReport(p, links2, compareWith) {
+  const h = projectHealth(p, links2, compareWith);
+  return h.report;
+}
+function scoped(p) {
+  const out = new Set(p.excludedEpics ?? []);
+  const epics = (p.jira?.epics ?? []).filter((e) => !out.has(e.key));
+  const keep = new Set(epics.map((e) => e.key));
+  return { epics, tickets: closeWithEpics(epics, (p.jira?.tickets ?? []).filter((t) => keep.has(t.epicKey))) };
+}
+function excludedReportRows(p) {
+  const out = new Set(p.excludedEpics ?? []);
+  const epics = (p.jira?.epics ?? []).filter((e) => out.has(e.key));
+  if (!epics.length) return [];
+  const keys = new Set(epics.map((e) => e.key));
+  const tickets = closeWithEpics(epics, (p.jira?.tickets ?? []).filter((t) => keys.has(t.epicKey)));
+  return buildReport({ project: p.name || p.key, date: today(), epics, tickets, sprints: [], engineers: 0, cal: [], prev: null }).epics;
+}
+function reportSnapshot(p) {
+  if (!p.jira) return null;
+  const sc = scoped(p);
+  return buildReport({
+    project: p.name || p.jira.summary || p.key,
+    date: today(),
+    epics: sc.epics,
+    tickets: sc.tickets,
+    sprints: [],
+    engineers: 0,
+    cal: [],
+    prev: null
+  }).snapshot;
+}
+function projectHealth(p, links2, compareWith) {
+  const t = today();
+  const snap = p.jira;
+  const base2 = {
+    id: p.id,
+    key: p.key,
+    name: p.name || snap?.summary || p.key,
+    ownName: p.name,
+    track: p.track ?? "auto",
+    tracked: snap?.tracked ?? null,
+    issueType: snap?.issueType ?? null,
+    startDate: p.startDate,
+    deadline: p.deadline,
+    ideaStatus: snap?.status ?? null,
+    fetchedAt: snap?.fetchedAt ?? null,
+    error: p.error,
+    today: t
+  };
+  const runs = (p.runs ?? []).map((r) => ({ date: r.date, rt: r.rt, tickets: Object.keys(r.t).length }));
+  const linkedEpics = (snap?.epics ?? []).map((e) => ({ key: e.key, summary: e.summary, status: e.status, done: e.done, estimateDays: e.estimateDays ?? null, quarters: e.quarters ?? [], excluded: (p.excludedEpics ?? []).includes(e.key) }));
+  if (!snap) return { ...base2, runs, linkedEpics, health: null, report: null };
+  const sc = scoped(p);
+  const people3 = peopleWithEmail();
+  const match = new Map(snap.assignees.map((a) => [a.accountId, { ...a, ...matchPerson(a, people3, links2) }]));
+  const personOf = (accountId) => {
+    if (!accountId) return null;
+    return match.get(accountId)?.id ?? "jira:" + accountId;
+  };
+  const cal = uniqueSprints();
+  const lo = [p.startDate, t, cal[0]?.startDate ?? t].reduce(minDate);
+  const day = dayFn(lo, addDays(maxDate(p.deadline, t), 730));
+  const allTickets = withCalendarDates(sc.tickets, cal);
+  const tickets = allTickets.filter((x) => !isCancelled(x));
+  const { forecastLog: _log, ...h } = evaluateProject(p, sc.epics, tickets, personOf, day, t, { progressFrom: cal[0]?.startDate ?? null });
+  const engineers = h.people.filter((x) => x.active).map((x) => x.id);
+  const prev = prevRun(p, t, compareWith);
+  const rs = reportSprints(p, cal, engineers, day, t);
+  const report = buildReport({
+    project: p.name || snap.summary || p.key,
+    date: t,
+    epics: sc.epics,
+    tickets: allTickets,
+    sprints: rs.sprints,
+    engineers: engineers.length,
+    cal,
+    prev,
+    personOf
+  });
+  const sp = sprintBreakdown(p, cal, tickets, personOf, { ...h, forecastLog: _log }, day, t);
+  const nameOf = new Map(people3.map((x) => [x.id, x.displayName]));
+  const accountOf = new Map([...match.values()].map((m) => [m.id ?? "jira:" + m.accountId, m]));
+  const fin = (u) => Number.isFinite(u) ? Math.round(u * 1e3) / 1e3 : null;
+  const baseline = baselineOf(snap, sc.epics, h.totals.current);
+  const closedOut = closedOutByEpic(sc.tickets);
+  return {
+    ...base2,
+    runs,
+    linkedEpics,
+    report: {
+      ...report,
+      compareWith: prev?.date ?? null,
+      // actual available capacity per sprint: each engineer's available days, capped at what one schedules in a sprint
+      schedulableCap: SPRINT_SCHEDULABLE_DAYS,
+      // the epics left out (unticked): their own rows, for display only — not in any total
+      excludedRows: excludedReportRows(p),
+      actualBySprint: rs.sprints.map((_, i) => Math.round(rs.perEngineer.reduce((a, e) => a + e.sprints[i].actual, 0) * 100) / 100),
+      // the engineers behind "Capacity, N engineers": name, leave known or not, per-sprint days
+      engineerRows: rs.perEngineer.map((e) => {
+        const m = accountOf.get(e.id);
+        return { ...e, name: nameOf.get(e.id) ?? m?.name ?? "Unknown", leaveKnown: !!m && m.how !== "none" };
+      })
+    },
+    health: {
+      ...h,
+      baseline,
+      quarters: quarterTotals(sc.epics, tickets),
+      utilisation: fin(h.utilisation),
+      people: h.people.map((x) => {
+        const m = accountOf.get(x.id);
+        return {
+          ...x,
+          utilisation: fin(x.utilisation),
+          name: nameOf.get(x.id) ?? m?.name ?? "Unknown",
+          accountId: m?.accountId ?? null,
+          matched: m?.how ?? "none"
+          // 'none' = no BambooHR person: leave unknown
+        };
+      }),
+      epics: sc.epics.map((e) => ({ ...e, ...h.epics.find((r) => r.key === e.key), closedOut: closedOut.get(e.key) ?? null })),
+      tickets: tickets.map((tk) => ({ ...tk, finish: h.ticketFinish[tk.key] ?? null })),
+      sprints: {
+        ...sp,
+        sprints: sp.sprints.map((x) => ({
+          ...x,
+          utilisation: fin(x.utilisation),
+          forecastUtilisation: fin(x.forecastUtilisation),
+          people: x.people.map((q2) => ({ ...q2, utilisation: fin(q2.utilisation) }))
+        }))
+      }
+    }
+  };
+}
+function peopleAllocation(projects2, links2) {
+  const t = today();
+  const withJira = projects2.filter((p) => p.jira);
+  const cal = uniqueSprints();
+  const people3 = peopleWithEmail();
+  const assignees = new Map(withJira.flatMap((p) => p.jira.assignees).map((a2) => [a2.accountId, a2]));
+  const match = new Map([...assignees.values()].map((a2) => [a2.accountId, { ...a2, ...matchPerson(a2, people3, links2) }]));
+  const personOf = (accountId) => accountId ? match.get(accountId)?.id ?? "jira:" + accountId : null;
+  const until = withJira.map((p) => p.deadline).reduce(maxDate, t);
+  const lo = [t, cal[0]?.startDate ?? t, ...withJira.map((p) => p.startDate)].reduce(minDate);
+  const day = dayFn(lo, addDays(until, 730));
+  const sources = withJira.map((p) => {
+    const sc = scoped(p);
+    return {
+      projectId: p.id,
+      projectName: p.name || p.jira.summary || p.key,
+      epics: sc.epics,
+      tickets: withCalendarDates(sc.tickets, cal).filter((x) => !isCancelled(x))
+    };
+  });
+  const a = allocation(sources, cal, personOf, day, t, until);
+  const nameOf = new Map(people3.map((x) => [x.id, x.displayName]));
+  const accountOf = new Map([...match.values()].map((m) => [m.id ?? "jira:" + m.accountId, m]));
+  const fin = (u) => u === null ? null : Number.isFinite(u) ? Math.round(u * 1e3) / 1e3 : null;
+  return {
+    today: t,
+    projects: withJira.map((p) => ({ id: p.id, name: p.name || p.jira.summary || p.key, deadline: p.deadline })),
+    missing: projects2.filter((p) => !p.jira).map((p) => p.name || p.key),
+    ...a,
+    people: a.people.map((x) => {
+      const m = accountOf.get(x.id);
+      return {
+        ...x,
+        name: nameOf.get(x.id) ?? m?.name ?? "Unknown",
+        leaveKnown: !!m && m.how !== "none",
+        cells: x.cells.map((c) => ({ ...c, load: fin(c.load), loadAhead: fin(c.loadAhead) }))
+      };
+    }).sort((p, q2) => p.name.localeCompare(q2.name))
+  };
+}
+var linkablePeople = () => peopleWithEmail().map((p) => ({ id: p.id, name: p.displayName }));
+
+// ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/jira/mappers.ts
+var ESTIMATE_HOURS_PER_DAY = 6;
+var JIRA_KEY = /^[A-Z][A-Z0-9_]{0,19}-\d{1,9}$/;
+var days2 = (sec) => typeof sec === "number" && Number.isFinite(sec) && sec >= 0 ? Math.round(sec / 3600 / ESTIMATE_HOURS_PER_DAY * 100) / 100 : null;
+var date = (s) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : null;
+var TICKET_FIELDS = ["summary", "status", "assignee", "parent", "issuetype", "resolution", "resolutiondate", "timeoriginalestimate", "timeestimate"];
+var EPIC_FIELDS = ["summary", "status", "duedate", "timeoriginalestimate", "labels"];
+function allSprints(raw) {
+  return (Array.isArray(raw) ? raw : []).filter((s) => s && typeof s.name === "string").map((s) => ({ id: s.id === void 0 || s.id === null ? null : String(s.id), name: s.name, state: s.state === "active" || s.state === "future" ? s.state : "closed", startDate: date(s.startDate), endDate: date(s.endDate) }));
+}
+function pickSprint(raw) {
+  const list = allSprints(raw);
+  return list.find((s) => s.state === "active") ?? list.filter((s) => s.state === "future").sort((a, b) => (a.startDate ?? "9999").localeCompare(b.startDate ?? "9999"))[0] ?? list.filter((s) => s.state === "closed").sort((a, b) => (b.endDate ?? "").localeCompare(a.endDate ?? ""))[0] ?? null;
+}
+var secs = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+function mapTicket(raw, rank, sprintField) {
+  const f = raw?.fields;
+  if (typeof raw?.key !== "string" || !f) return null;
+  const a = f.assignee?.accountId ? { accountId: String(f.assignee.accountId), name: f.assignee.displayName ? String(f.assignee.displayName) : null, email: f.assignee.emailAddress ? String(f.assignee.emailAddress) : null } : null;
+  return {
+    key: raw.key,
+    summary: String(f.summary ?? "").slice(0, 200),
+    status: String(f.status?.name ?? ""),
+    done: f.status?.statusCategory?.key === "done",
+    epicKey: String(f.parent?.key ?? ""),
+    // a sub-task's parent is its story: the caller swaps in the story's epic
+    assigneeId: a?.accountId ?? null,
+    assigneeName: a?.name ?? null,
+    originalDays: days2(f.timeoriginalestimate),
+    remainingDays: days2(f.timeestimate),
+    origSec: secs(f.timeoriginalestimate),
+    remSec: secs(f.timeestimate),
+    sprint: sprintField ? pickSprint(f[sprintField]) : null,
+    sprints: sprintField ? allSprints(f[sprintField]) : [],
+    resolvedDate: date(f.resolutiondate),
+    resolution: f.resolution?.name ? String(f.resolution.name) : null,
+    subtask: !!f.issuetype?.subtask,
+    type: f.issuetype?.name ? String(f.issuetype.name) : void 0,
+    rank,
+    assignee: a
+  };
+}
+function quarterLabels(labels) {
+  if (!Array.isArray(labels)) return [];
+  const qs = labels.flatMap((l) => {
+    const m = /^q([1-4])[\s_-]?(20\d\d)$/i.exec(String(l).trim());
+    return m ? [`Q${m[1]}-${m[2]}`] : [];
+  });
+  return [...new Set(qs)].sort(byQuarter);
+}
+var byQuarter = (a, b) => a.slice(3).localeCompare(b.slice(3)) || a.localeCompare(b);
+function mapEpic(raw) {
+  const f = raw?.fields;
+  if (typeof raw?.key !== "string" || !f) return null;
+  return { key: raw.key, summary: String(f.summary ?? "").slice(0, 200), status: String(f.status?.name ?? ""), done: f.status?.statusCategory?.key === "done", dueDate: date(f.duedate), estimateDays: days2(f.timeoriginalestimate), quarters: quarterLabels(f.labels) };
+}
+function cleanSite(input) {
+  let s = String(input || "").trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0];
+  if (/^[a-z0-9][a-z0-9-]{0,62}$/.test(s)) s += ".atlassian.net";
+  if (!/^[a-z0-9][a-z0-9.-]{1,200}\.[a-z]{2,}$/.test(s)) throw new Error('Jira site should look like "acme.atlassian.net".');
+  return s;
+}
+
+// ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/projects.ts
+var FILE2 = "projects.json";
+var state2 = { projects: [], links: {} };
+async function loadProjects() {
+  try {
+    const json = JSON.parse(new TextDecoder().decode(await tjs.readFile(dataPath(FILE2))));
+    state2 = {
+      projects: (Array.isArray(json?.projects) ? json.projects : []).filter((p) => typeof p?.id === "string" && isDate(p.startDate) && isDate(p.deadline)),
+      links: json?.links && typeof json.links === "object" ? json.links : {}
+    };
+    for (const p of state2.projects) if (p.name && p.jira?.summary && p.name === p.jira.summary.trim().replace(/\s+/g, " ").slice(0, 120)) p.name = "";
+  } catch {
+  }
+}
+async function save2() {
+  await tjs.writeFile(dataPath(FILE2), new TextEncoder().encode(JSON.stringify(state2, null, 2) + "\n"));
+}
+var projects = () => structuredClone(state2.projects);
+var projectById = (id) => structuredClone(state2.projects.find((p) => p.id === id) ?? null);
+var links = () => ({ ...state2.links });
+function parseJiraKey(raw) {
+  const s = String(raw ?? "").trim().toUpperCase();
+  if (JIRA_KEY.test(s)) return s;
+  const m = /(?:BROWSE\/|SELECTEDISSUE=)([A-Z][A-Z0-9_]{0,19}-\d{1,9})\b/.exec(s) ?? /^\S*?\b([A-Z][A-Z0-9_]{0,19}-\d{1,9})\b\S*$/.exec(s);
+  return m ? m[1] : s;
+}
+async function saveProject(input) {
+  const cur = typeof input?.id === "string" ? state2.projects.find((p2) => p2.id === input.id) : void 0;
+  if (typeof input?.id === "string" && input.id && !cur) throw new Error("This project was removed from the board.");
+  const key = parseJiraKey(input?.key);
+  if (!JIRA_KEY.test(key)) throw new Error("Enter the Jira idea key, e.g. IDEA-42 (or paste its Jira link).");
+  const dup = state2.projects.find((p2) => p2.key === key && p2.id !== cur?.id);
+  if (dup) throw new Error(`${key} is already on the board${dup.name ? ` as \u201C${dup.name}\u201D` : ""}.`);
+  const track = input?.track === "idea" || input?.track === "epic" ? input.track : input?.track === "auto" || !cur ? "auto" : cur.track ?? "auto";
+  const sameKey = !!cur && cur.key === key && (cur.track ?? "auto") === track;
+  let name = String(input?.name ?? "").trim().replace(/\s+/g, " ").slice(0, 120);
+  if (cur && !sameKey && cur.jira?.summary && name === cur.jira.summary.trim().replace(/\s+/g, " ").slice(0, 120)) name = "";
+  const { startDate, deadline } = input ?? {};
+  if (!isDate(startDate)) throw new Error("Pick a start date.");
+  if (!isDate(deadline)) throw new Error("Pick a deadline.");
+  if (deadline < startDate) throw new Error("The deadline is before the start date.");
+  const p = {
+    id: cur?.id ?? `pr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    key,
+    name,
+    track,
+    startDate,
+    deadline,
+    jira: sameKey ? cur.jira : null,
+    error: sameKey ? cur.error : null,
+    runs: sameKey ? cur.runs ?? [] : [],
+    // the left-out list names the OLD idea's epics: a new key starts with all in
+    excludedEpics: !sameKey && cur ? [] : Array.isArray(input?.excludedEpics) ? [...new Set(input.excludedEpics.map((k) => String(k).toUpperCase()).filter((k) => JIRA_KEY.test(k)))] : cur?.excludedEpics ?? []
+  };
+  state2.projects = cur ? state2.projects.map((x) => x.id === p.id ? p : x) : [...state2.projects, p];
+  await save2();
+  return structuredClone(p);
+}
+async function deleteProject(id) {
+  const gone = state2.projects.find((p) => p.id === id);
+  if (!gone) return false;
+  state2.projects = state2.projects.filter((p) => p.id !== id);
+  const stillUsed = new Set(state2.projects.flatMap((p) => p.jira?.assignees.map((a) => a.accountId) ?? []));
+  for (const a of gone.jira?.assignees ?? []) if (!stillUsed.has(a.accountId)) delete state2.links[a.accountId];
+  await save2();
+  return true;
+}
+async function setSnapshot(id, snap, error, key) {
+  const p = state2.projects.find((x) => x.id === id);
+  if (!p || key && p.key !== key || snap && snap.key !== p.key) return false;
+  if (snap) p.jira = snap;
+  p.error = error;
+  await save2();
+  return true;
+}
+var MAX_RUNS = 60;
+async function saveRun(id, run3) {
+  const p = state2.projects.find((x) => x.id === id);
+  if (!p) throw new Error("This project was removed from the board.");
+  p.runs = [run3, ...(p.runs ?? []).filter((r) => r.date !== run3.date)].sort((a, b) => b.date.localeCompare(a.date)).slice(0, MAX_RUNS);
+  await save2();
+}
+async function deleteRun(id, date2) {
+  const p = state2.projects.find((x) => x.id === id);
+  if (!p) return;
+  p.runs = (p.runs ?? []).filter((r) => r.date !== date2);
+  await save2();
+}
+async function setLink(accountId, employeeId) {
+  if (employeeId) state2.links[accountId] = employeeId;
+  else delete state2.links[accountId];
+  await save2();
+}
+
+// ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/jira/client.ts
+var JiraError = class extends Error {
+  status;
+  constructor(message, status2) {
+    super(message);
+    this.status = status2;
+  }
+};
+var sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
+function b642(s) {
+  let bin = "";
+  for (const b of new TextEncoder().encode(s)) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+function createJira(site, email, token, timeoutMs = 3e4) {
+  const base2 = `https://${site}/rest/api/3/`;
+  const auth = "Basic " + b642(`${email}:${token}`);
+  async function request(method, path, body) {
+    let delay = 1e3;
+    for (let attempt = 1; ; attempt++) {
+      let res;
+      const ctl = new AbortController();
+      const timer3 = setTimeout(() => ctl.abort(), timeoutMs);
+      try {
+        res = await fetch(base2 + path, {
+          method,
+          headers: { Authorization: auth, Accept: "application/json", ...body ? { "Content-Type": "application/json" } : {} },
+          body: body ? JSON.stringify(body) : void 0,
+          signal: ctl.signal
+        });
+      } catch (e) {
+        if (attempt < 4) {
+          await sleep2(delay);
+          delay *= 2;
+          continue;
+        }
+        throw new JiraError(`Could not reach Jira (${e?.name === "AbortError" ? "timed out" : "unreachable"}).`, 0);
+      } finally {
+        clearTimeout(timer3);
+      }
+      if ((res.status === 429 || res.status === 503) && attempt < 4) {
+        const ra = Number(res.headers.get("retry-after"));
+        await sleep2(Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1e3, 6e4) : delay);
+        delay *= 2;
+        continue;
+      }
+      if (!res.ok) {
+        const hint = res.status === 401 ? " \u2014 check the email and API token" : res.status === 403 ? " \u2014 your Jira account lacks access" : res.status === 404 ? " \u2014 not found (check the key and site)" : "";
+        throw new JiraError(`Jira ${res.status} on ${path.split("?")[0]}${hint}`, res.status);
+      }
+      const text = await res.text();
+      return text ? JSON.parse(text) : null;
+    }
+  }
+  async function search(jql, fields, cap = 2e3) {
+    const out = [];
+    let nextPageToken;
+    while (out.length < cap) {
+      const r = await request("POST", "search/jql", { jql, fields, maxResults: 100, ...nextPageToken ? { nextPageToken } : {} });
+      out.push(...r?.issues ?? []);
+      nextPageToken = r?.nextPageToken;
+      if (!nextPageToken || r?.isLast) break;
+    }
+    return out;
+  }
+  let sprintField;
+  async function sprintFieldId() {
+    if (sprintField !== void 0) return sprintField;
+    const list = await request("GET", "field") ?? [];
+    sprintField = list.find((f) => f?.schema?.custom === "com.pyxis.greenhopper.jira:gh-sprint")?.id ?? null;
+    return sprintField ?? null;
+  }
+  return {
+    /** the token's account — used to check credentials */
+    myself: () => request("GET", "myself"),
+    /** what a project tracks, by `track`:
+     *   'idea' — the epics linked to (or under) the key, and their tickets
+     *   'epic' — the key's own tickets; with none, the key itself is the one ticket
+     *   'auto' — Idea → 'idea'; Epic → its own tickets, else its linked epics
+     *            (an epic used as an umbrella); Task/Story/Bug → itself */
+    async project(key, track = "auto") {
+      const idea = await request("GET", `issue/${encodeURIComponent(key)}?fields=${[.../* @__PURE__ */ new Set([...EPIC_FIELDS, "issuetype"])].join(",")}`);
+      const type = idea?.fields?.issuetype;
+      const typeName = String(type?.name ?? "");
+      const isEpicType = type?.hierarchyLevel === 1 || /epic/i.test(typeName);
+      const linkedEpics = async () => (await search(`issuetype = Epic AND (issue in linkedIssues("${key}") OR parent = ${key}) ORDER BY rank`, EPIC_FIELDS)).map(mapEpic).filter((e) => !!e);
+      const hasChildren = async () => (await search(`parent = ${key} AND issuetype != Epic`, ["summary"], 1)).length > 0;
+      let mode = track === "idea" ? "idea" : track === "epic" ? "epic" : /idea/i.test(typeName) ? "idea" : "epic";
+      let epics = [];
+      if (mode === "idea") epics = await linkedEpics();
+      else if (track === "auto" && isEpicType && !await hasChildren()) {
+        epics = await linkedEpics();
+        if (epics.length) mode = "idea";
+      }
+      if (mode === "epic" || !epics.length) epics = [mapEpic(idea)];
+      const sf = await sprintFieldId();
+      const tickets = [];
+      const assignees = /* @__PURE__ */ new Map();
+      const fields = sf ? [...TICKET_FIELDS, sf] : TICKET_FIELDS;
+      const add = (r, epicOf) => {
+        const t = mapTicket(r, tickets.length, sf);
+        if (!t) return;
+        const { assignee, ...ticket } = t;
+        if (epicOf) {
+          ticket.parentKey = ticket.epicKey;
+          ticket.epicKey = epicOf.get(ticket.epicKey) ?? "";
+          ticket.subtask = true;
+        }
+        if (!ticket.epicKey) return;
+        if (assignee) assignees.set(assignee.accountId, assignee);
+        tickets.push(ticket);
+      };
+      for (let i = 0; i < epics.length; i += 40) {
+        const keys = epics.slice(i, i + 40).map((e) => e.key).join(", ");
+        for (const r of await search(`parent in (${keys}) ORDER BY rank`, fields)) add(r);
+      }
+      if (!tickets.length && epics.length === 1 && epics[0].key === key) {
+        for (const r of await search(`key = ${key}`, fields, 1)) {
+          r.fields = { ...r.fields, parent: { key } };
+          add(r);
+        }
+      }
+      const storyEpic = new Map(tickets.map((t) => [t.key, t.epicKey]));
+      const stories = [...storyEpic.keys()];
+      for (let i = 0; i < stories.length; i += 100) {
+        for (const r of await search(`parent in (${stories.slice(i, i + 100).join(", ")}) ORDER BY rank`, fields, 5e3)) add(r, storyEpic);
+      }
+      return {
+        key,
+        tracked: mode,
+        issueType: typeName,
+        summary: String(idea?.fields?.summary ?? ""),
+        status: String(idea?.fields?.status?.name ?? ""),
+        dueDate: typeof idea?.fields?.duedate === "string" ? idea.fields.duedate : null,
+        estimateDays: mapEpic(idea)?.estimateDays ?? null,
+        // the project's high-level original estimate: the baseline
+        fetchedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        epics,
+        tickets,
+        assignees: [...assignees.values()]
+      };
+    }
+  };
 }
 
 // ../../../../../../../Users/nirajmaharjan/sandbox/tinyjsapp-examples/leave-radar/backend/main.ts
@@ -2399,6 +3833,101 @@ var api = {
     await whenReady();
     return { ...lookups(), today: today() };
   },
+  // ---- project health (projects live in <data>/projects.json; Jira is read-only) --
+  getProjects: async (_, app) => {
+    await whenReady();
+    const jira = await getJira(app);
+    if (jira) void refreshStale(app);
+    const links2 = links();
+    return { jiraSite: jira?.site ?? null, projects: projects().map((p) => projectHealth(p, links2)), people: linkablePeople() };
+  },
+  /** people board: each person's capacity across every project's epics, per sprint */
+  getAllocation: async (_, app) => {
+    await whenReady();
+    const jira = await getJira(app);
+    return { jiraSite: jira?.site ?? null, ...peopleAllocation(projects(), links()) };
+  },
+  /** saves, then pulls the idea's epics + tickets */
+  saveProject: async (input, app) => {
+    await whenReady();
+    const p = await saveProject(input);
+    const warning = p.jira ? null : await pullProject(app, p.id);
+    app.push("data-changed");
+    return { id: p.id, warning };
+  },
+  deleteProject: async ({ id }, app) => {
+    await whenReady();
+    const pid = String(id ?? "");
+    const ok = await deleteProject(pid);
+    tried.delete(pid);
+    app.push("data-changed");
+    return { ok };
+  },
+  /** id = one project; none = all */
+  refreshProjects: async ({ id } = {}, app) => {
+    await whenReady();
+    const ids = id ? [String(id)] : projects().map((p) => p.id);
+    const errors = [];
+    for (const x of ids) {
+      const w = await pullProject(app, x);
+      if (w) errors.push(w);
+    }
+    app.push("data-changed");
+    return { refreshed: ids.length - errors.length, errors };
+  },
+  /** the forecast report against a chosen earlier run */
+  getForecastReport: async ({ id, compareWith }) => {
+    await whenReady();
+    const p = projectById(String(id ?? ""));
+    if (!p) throw new Error("No such project.");
+    return forecastReport(p, links(), compareWith ? String(compareWith) : null);
+  },
+  /** paste a "Snapshot for next run" from the Confluence forecast page as a baseline */
+  importRun: async ({ id, text }, app) => {
+    await whenReady();
+    const run3 = parseSnapshot(String(text ?? ""));
+    await saveRun(String(id ?? ""), run3);
+    app.push("data-changed");
+    return { date: run3.date, tickets: Object.keys(run3.t).length };
+  },
+  deleteRun: async ({ id, date: date2 }, app) => {
+    await whenReady();
+    await deleteRun(String(id ?? ""), String(date2 ?? ""));
+    app.push("data-changed");
+    return { ok: true };
+  },
+  /** link a Jira assignee to a BambooHR person so their leave counts */
+  linkPerson: async ({ accountId, employeeId }, app) => {
+    await whenReady();
+    const emp = String(employeeId ?? "");
+    if (emp && !linkablePeople().some((p) => p.id === emp)) throw new Error("That person is not in your team.");
+    await setLink(String(accountId ?? ""), emp);
+    app.push("data-changed");
+    return { ok: true };
+  },
+  getJiraStatus: async (_, app) => {
+    const j = await getJira(app);
+    return { configured: !!j, site: j?.site ?? null, email: j?.email ?? null };
+  },
+  /** checks the token against /myself before keeping it */
+  setJira: async ({ site, email, token }, app) => {
+    const s = cleanSite(site);
+    const em = String(email ?? "").trim();
+    const tk = String(token ?? "").trim();
+    if (!/^[^@\s]+@[^@\s]+$/.test(em)) throw new Error("Enter the email of your Atlassian account.");
+    if (tk.length < 10) throw new Error("That does not look like a Jira API token.");
+    try {
+      await createJira(s, em, tk).myself();
+    } catch (e) {
+      throw new Error(e instanceof JiraError ? e.message : "Could not reach Jira.");
+    }
+    await setJira(app, { site: s, email: em, token: tk });
+    return { configured: true, site: s, email: em };
+  },
+  clearJira: async (_, app) => {
+    await setJira(app, null);
+    return { configured: false, site: null, email: null };
+  },
   // ---- saved views --------------------------------------------------------------
   listViews: async () => {
     await whenReady();
@@ -2582,6 +4111,40 @@ var api = {
   // ---- sign out = remove the (first selected) team ------------------------------
   signOut: async (_, app, meta) => api.removeTeam({}, app, meta)
 };
+var refreshing = false;
+var tried = /* @__PURE__ */ new Map();
+async function refreshStale(app) {
+  if (refreshing) return;
+  const cutoff = Date.now() - 60 * 6e4;
+  const stale = projects().filter((p) => (tried.get(p.id) ?? 0) < cutoff && (!p.jira || Date.parse(p.jira.fetchedAt) < cutoff));
+  if (!stale.length) return;
+  refreshing = true;
+  try {
+    for (const p of stale) await pullProject(app, p.id);
+    app.push("data-changed");
+  } finally {
+    refreshing = false;
+  }
+}
+async function pullProject(app, id) {
+  const p = projectById(id);
+  if (!p) return null;
+  const j = await getJira(app);
+  if (!j) return "Connect Jira in Settings to pull the project\u2019s epics and tickets.";
+  tried.set(id, Date.now());
+  let snap;
+  try {
+    snap = await createJira(j.site, j.email, j.token).project(p.key, p.track ?? "auto");
+  } catch (x) {
+    const msg = x instanceof JiraError ? x.message : "Could not reach Jira.";
+    return await setSnapshot(id, null, msg, p.key) ? `${p.key}: ${msg}` : null;
+  }
+  if (!await setSnapshot(id, snap, snap.epics.length ? null : `No epics are linked to ${p.key}.`, p.key)) return null;
+  const fresh = projectById(id);
+  const run3 = fresh && reportSnapshot(fresh);
+  if (run3) await saveRun(id, run3);
+  return null;
+}
 async function maybeSendDigest(app) {
   const d = getSetting("digest", DIGEST_DEFAULT);
   if (!d.enabled || !await getSlackWebhook(app)) return;
@@ -2620,6 +4183,7 @@ function init(app) {
     if (Object.keys(clean).length !== Object.keys(sq.map).length) await saveSquads(clean, manualSquads(sq.squads, clean));
     applySquads(clean);
     applyScope(selectedIds());
+    await loadProjects();
   })();
   ready.then(async () => {
     if (await isConfigured(app)) startLoop(app);

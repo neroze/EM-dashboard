@@ -40,6 +40,7 @@ export function mapEmployees(json: any, t: string = today()): Employee[] {
       // supervisorEId = the manager's employee id; supervisorId is their
       // employee NUMBER in some tenants, so it is only a fallback (verify)
       reportsToId: str(e.supervisorEId) ?? str(e.supervisorId) ?? null,
+      workEmail: str(e.workEmail) ?? null,
       active: isActiveEmployee(e, t),
       inScope: false,
     });

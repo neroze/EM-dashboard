@@ -10,6 +10,8 @@ export interface Employee {
   team: string | null;
   location: string | null;
   reportsToId: string | null;
+  /** work email — only used to match Jira assignees (optional) */
+  workEmail?: string | null;
   /** still employed: BambooHR status Active and no termination date that has passed */
   active: boolean;
   inScope: boolean;

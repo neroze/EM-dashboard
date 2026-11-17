@@ -1,4 +1,4 @@
-# Leave Radar
+# Capacity Radar
 
 One view of every leave request in your reporting line — **Draft** (requested,
 awaiting approval) and **Planned** (approved) — sourced from BambooHR, with
@@ -11,7 +11,7 @@ npm install
 tinyjs dev            # hot reload
 npm test              # unit tests (mappers, status, org tree, capacity, export)
 npm run typecheck
-tinyjs build          # dist/Leave Radar.app (ad-hoc signed, ~10 MB)
+tinyjs build          # dist/Capacity Radar.app (ad-hoc signed, ~10 MB)
                       # --universal for one app on Apple Silicon + Intel
 ```
 

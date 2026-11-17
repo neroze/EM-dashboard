@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS employee (
   team          TEXT,               -- squad from the local squads mapping
   location      TEXT,
   reports_to_id TEXT,
+  work_email    TEXT,               -- matches Jira assignees
   in_scope      INTEGER NOT NULL    -- 1 if a member of a SELECTED team (see team_member)
 );
 

@@ -7,8 +7,10 @@
 import { createContext, useContext, useMemo, useState } from 'react';
 import { openInBamboo } from '../bamboo-link.ts';
 import { approveLeave } from '../approve.ts';
-import { fmtAgo, fmtDay, fmtDays, fmtMonth, fmtRange, fmtShort, STATUS_LABEL } from '../format.ts';
+import { fmtAgo, fmtDay, fmtDays, fmtMonth, fmtRange, fmtShort, sprintName, STATUS_LABEL } from '../format.ts';
 import { Sortable } from '../components/Sortable.tsx';
+import { CopyButton } from '../components/CopyButton.tsx';
+import { copyTable } from '../copy.ts';
 import { autoLayout, resetLayouts } from '../state/layout.ts';
 import { YearSection } from './YearSummary.tsx';
 import type { UiFilters, AppStatus, DailyPoint, Dashboard, DashItem, DashPeriod, DashSection, Ranked, SameDay, SprintLeave } from '../types.ts';
@@ -100,10 +102,11 @@ function Widget({ title, range, count, unit, children, extra, className, badge, 
   tools?: React.ReactNode;
 }) {
   return (
-    <div className={'widget' + (className ? ' ' + className : '')}>
+    <div className={'widget' + (className ? ' ' + className : '')} data-copy>
       <div className="w-head">
         <span className="w-title">{title}{badge}</span>
         <span className="w-range">{range}</span>
+        <CopyButton />
       </div>
       <div className="w-count">{count}<small> {unit}</small></div>
       {extra}
@@ -140,7 +143,7 @@ function TypeSplit({ parts, unit }: { parts: [string, number][]; unit: (n: numbe
 function DailyColumns({ daily, today }: { daily: DailyPoint[]; today: string }) {
   const max = Math.max(2, ...daily.map((d) => d.people));
   return (
-    <div className="cols-wrap">
+    <div className="cols-wrap" data-copy-table={copyTable([['Day', 'People away'], ...daily.map((d) => [d.day, d.people])])}>
       <div className="cols" role="img" aria-label="People away per working day">
         <span className="cols-ref" style={{ bottom: `${(2 / max) * 100}%` }} title="2 people" />
         {daily.map((d) => (
@@ -354,7 +357,7 @@ function SprintOverview({ sprints }: { sprints: SprintLeave[] }) {
       {sprints.map((sp) => (
         <div key={sp.name} className={'sp-row ' + sp.role}>
           <div className="sp-row-h">
-            <span className="w-name"><b>{sp.name}</b> <RoleBadge role={sp.role} /></span>
+            <span className="w-name" title={sp.name}><b>{sprintName(sp.name)}</b> <RoleBadge role={sp.role} /></span>
             <span className="nowrap small"><b>{n2(sp.days)}</b> d · {sp.people.length} {sp.people.length === 1 ? 'person' : 'people'}</span>
           </div>
           <div className="sp-bar" title={Object.entries(sp.byType).map(([t, v]) => `${t}: ${fmtDays(v)}`).join('\n') || 'No leave'}>
@@ -396,7 +399,7 @@ function SprintWidget({ sp }: { sp: SprintLeave }) {
   const color = useColor();
   const [mode, setMode] = useListMode('sprint-widget');
   return (
-    <Widget title={sp.name} badge={<RoleBadge role={sp.role} />} range={fmtRange(sp.startDate, sp.endDate)}
+    <Widget title={sprintName(sp.name)} badge={<RoleBadge role={sp.role} />} range={fmtRange(sp.startDate, sp.endDate)}
       tools={sp.people.length ? <ListModeSwitch mode={mode} onChange={setMode} /> : undefined}
       count={sp.people.length} unit={sp.people.length === 1 ? 'person on leave' : 'people on leave'}
       className={'sprint-w ' + sp.role + (hl ? ' hl' : '')}

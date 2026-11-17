@@ -5,7 +5,7 @@ import { useSyncExternalStore } from 'react';
 import { addDays, addMonths, isDate, parse } from '../../backend/domain/dates.ts';
 import type { SprintInfo, Sort, UiFilters } from '../types.ts';
 
-export type View = 'dashboard' | 'longleave' | 'calendar' | 'list' | 'capacity';
+export type View = 'dashboard' | 'longleave' | 'calendar' | 'list' | 'capacity' | 'projects' | 'people' | 'overview';
 export type Zoom = 'week' | 'sprint' | 'month';
 
 export interface UiState {
@@ -132,7 +132,7 @@ export function readHash(today: string, sprints: SprintInfo[]): boolean {
   const p = new URLSearchParams(location.hash.slice(1));
   const v = p.get('v'), z = p.get('z'), s = p.get('s');
   const patch: Partial<UiState> = {};
-  if (v === 'dashboard' || v === 'longleave' || v === 'calendar' || v === 'list' || v === 'capacity') patch.view = v;
+  if (v === 'dashboard' || v === 'longleave' || v === 'calendar' || v === 'list' || v === 'capacity' || v === 'projects' || v === 'people' || v === 'overview') patch.view = v;
   if (z === 'week' || z === 'sprint' || z === 'month') patch.zoom = z;
   if (s) {
     const [key, dir] = s.split(':');

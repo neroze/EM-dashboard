@@ -39,6 +39,8 @@ export function open(path: string) {
       'DROP TABLE IF EXISTS holiday; DROP TABLE IF EXISTS sprint; DROP TABLE IF EXISTS leave_type; DROP TABLE IF EXISTS sync_log;');
   }
   db.exec(SCHEMA);
+  // added after v2 shipped: add the column in place (no cache rebuild)
+  if (!db.prepare('PRAGMA table_info(employee)').all().some((c: any) => c.name === 'work_email')) db.exec('ALTER TABLE employee ADD COLUMN work_email TEXT');
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
@@ -77,10 +79,10 @@ export function replaceEmployees(list: Employee[]) {
     run('CREATE TEMP TABLE IF NOT EXISTS keep_emp (id TEXT PRIMARY KEY)');
     run('DELETE FROM keep_emp');
     for (const e of list) {
-      run(`INSERT INTO employee(id, display_name, team, location, reports_to_id, in_scope) VALUES (?,?,?,?,?,?)
+      run(`INSERT INTO employee(id, display_name, team, location, reports_to_id, work_email, in_scope) VALUES (?,?,?,?,?,?,?)
            ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, team=excluded.team,
-             location=excluded.location, reports_to_id=excluded.reports_to_id, in_scope=excluded.in_scope`,
-        e.id, e.displayName, e.team, e.location, e.reportsToId, e.inScope ? 1 : 0);
+             location=excluded.location, reports_to_id=excluded.reports_to_id, work_email=excluded.work_email, in_scope=excluded.in_scope`,
+        e.id, e.displayName, e.team, e.location, e.reportsToId, e.workEmail ?? null, e.inScope ? 1 : 0);
       run('INSERT OR IGNORE INTO keep_emp(id) VALUES (?)', e.id);
     }
     // people who left the directory: drop them and their leave
@@ -97,10 +99,10 @@ export function replaceEmployees(list: Employee[]) {
 export function replaceTeamEmployees(teamId: string, list: Employee[]) {
   tx(() => {
     for (const e of list) {
-      run(`INSERT INTO employee(id, display_name, team, location, reports_to_id, in_scope) VALUES (?,?,?,?,?,0)
+      run(`INSERT INTO employee(id, display_name, team, location, reports_to_id, work_email, in_scope) VALUES (?,?,?,?,?,?,0)
            ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name, team=excluded.team,
-             location=excluded.location, reports_to_id=excluded.reports_to_id`,
-        e.id, e.displayName, e.team, e.location, e.reportsToId);
+             location=excluded.location, reports_to_id=excluded.reports_to_id, work_email=excluded.work_email`,
+        e.id, e.displayName, e.team, e.location, e.reportsToId, e.workEmail ?? null);
     }
     run('DELETE FROM team_member WHERE team_id = ?', teamId);
     for (const e of list) if (e.inScope) run('INSERT OR IGNORE INTO team_member(team_id, employee_id) VALUES (?,?)', teamId, e.id);
@@ -254,6 +256,11 @@ export function people(f: Pick<Filters, 'people' | 'teams' | 'locations'> = {}):
   return all(`SELECT id, display_name AS displayName, ${teamOf('e')} AS team,
       COALESCE(location, 'Unknown') AS location FROM employee e WHERE ${where.join(' AND ')}
       ORDER BY team, display_name`, ...p);
+}
+
+/** in-scope people with their work email (for matching Jira assignees) */
+export function peopleWithEmail(): { id: string; displayName: string; email: string | null }[] {
+  return all(`SELECT id, display_name AS displayName, work_email AS email FROM employee WHERE in_scope = 1 ORDER BY display_name`);
 }
 
 export function allEmployees(): { id: string; displayName: string; team: string | null; location: string | null; reportsToId: string | null; inScope: number }[] {

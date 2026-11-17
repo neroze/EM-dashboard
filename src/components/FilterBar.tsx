@@ -6,6 +6,7 @@ import { applyFilters, defaultFilters, PRESETS, resolvePreset, setFilters, useUi
 import type { Lookups, SavedView, UiFilters } from '../types.ts';
 import { MultiSelect } from './MultiSelect.tsx';
 import { Select } from './Select.tsx';
+import { sprintName } from '../format.ts';
 import { TeamTag } from './TeamColor.tsx';
 import { groupByTeam, useTeamOrder } from '../teamColors.ts';
 
@@ -81,7 +82,7 @@ export function FilterBar({ lookups, views, onSaveView, onDeleteView, dashboard,
               onChange={(v) => (v ? setPreset('sprint:' + v) : setPreset('this-sprint'))}
               options={[{ value: '', label: 'Sprint…' }, ...lookups.sprints.map((s) => ({
                 value: s.name,
-                label: s.name + (s.startDate <= lookups.today && s.endDate >= lookups.today ? ' (current)' : ''),
+                label: sprintName(s.name) + (s.startDate <= lookups.today && s.endDate >= lookups.today ? ' (current)' : ''),
               }))]} />
             <div className="side-dates">
               <input type="date" value={f.from} max={f.to} aria-label="From" onChange={(e) => e.target.value && setFilters({ from: e.target.value, preset: 'custom' })} />

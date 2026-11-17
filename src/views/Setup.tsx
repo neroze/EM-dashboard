@@ -38,7 +38,7 @@ export function SetupView({ onDone, onCancel, teamName = '', teamColor, usedColo
   return (
     <div className={adding ? 'sheet-backdrop setup-overlay' : 'setup'} onMouseDown={(e) => adding && e.target === e.currentTarget && onCancel!()}>
       <form className="setup-card" onSubmit={connect}>
-        <h1>{adding ? 'Add a team' : 'Leave Radar'}</h1>
+        <h1>{adding ? 'Add a team' : 'Capacity Radar'}</h1>
         <p className="muted">{adding
           ? 'Each team uses its own BambooHR API key — the key owner’s reporting line is the team. Switch teams from the top bar.'
           : 'Every Draft and Planned leave request in your reporting line, from BambooHR.'}</p>

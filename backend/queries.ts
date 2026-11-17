@@ -2,8 +2,12 @@
 import * as repo from './db/repo.ts';
 import { capacityByTeam, teamLoad, type CapDay, type OverlapDay, type TeamCapacity } from './domain/capacity.ts';
 import { buildDashboard, dashRanges, isWfhType, pickSprints, yearSummary } from './domain/dashboard.ts';
+import { baselineOf, closedOutByEpic, schedulable, SPRINT_SCHEDULABLE_DAYS, closeWithEpics, evaluateProject, quarterTotals, leaveDates, matchPerson, sprintBreakdown, windowDays, withCalendarDates, type DayFn, type PersonResult } from './domain/projectHealth.ts';
+import { allocation } from './domain/allocation.ts';
+import { buildReport, isCancelled, sprintLabel, type EngineerCapacity, type ReportSprint, type Snapshot } from './domain/forecastReport.ts';
+import type { Project } from './projects.ts';
 import { countsAsLongLeave, findRuns, longLeaveYear } from './domain/longleave.ts';
-import { addDays, addMonths, diffDays, eachDay, isDate, maxDate, minDate, today } from './domain/dates.ts';
+import { addDays, addMonths, diffDays, eachDay, isDate, isWeekend, maxDate, minDate, today } from './domain/dates.ts';
 import { appStatus, bambooStatusesFor, DEFAULT_STATUSES, isActive } from './domain/status.ts';
 import type { AppStatus, Filters, Holiday, LeaveRecord } from './domain/types.ts';
 import { holidayIndex } from './sync/scheduler.ts';
@@ -343,7 +347,7 @@ export function digest(): { title: string; text: string } {
   const recs = leave({ from: t, to, statuses: ['planned', 'draft'] }).filter((r) => r.days > 0);
   const flagged = overlaps({ from: t, to });
   const lines: string[] = [];
-  const title = `Leave Radar — next two weeks (${t} → ${to})`;
+  const title = `Capacity Radar — next two weeks (${t} → ${to})`;
   lines.push(title, '');
   if (!recs.length) lines.push('Nobody is out or has leave pending.');
   // grouped by team, in the app's team order
@@ -381,3 +385,228 @@ function monthPeriods(from: string, to: string) {
   }
   return out;
 }
+
+// ---- project health board ------------------------------------------------------
+// Returns days unavailable only — never a leave type (sick leave is sensitive).
+
+/** person-day lookup over [from, to]: working day for their location, and
+ *  approved non-WFH leave. "jira:<id>" = a Jira assignee not matched to
+ *  BambooHR: weekdays, no leave known. */
+export function dayFn(from: string, to: string): DayFn {
+  const loc = new Map(repo.people().map((p) => [p.id, p.location]));
+  const hol = holidayIndex(repo.holidays(from, to));
+  const out = new Map<string, number>();
+  for (const d of repo.days(from, to, ['approved'])) {
+    if (isWfhType(d.typeName)) continue;
+    const k = d.employeeId + '|' + d.day;
+    out.set(k, (out.get(k) ?? 0) + d.fraction);
+  }
+  return (id, day) => {
+    if (isWeekend(day)) return { working: false, out: 0 };
+    if (id.startsWith('jira:')) return { working: true, out: 0 };
+    const l = loc.get(id);
+    if (l === undefined || hol(day, l)) return { working: false, out: 0 };
+    return { working: true, out: out.get(id + '|' + day) ?? 0 };
+  };
+}
+
+/** the run to compare with: the chosen date, else the newest from an earlier day */
+function prevRun(p: Project, today: string, compareWith?: string | null): Snapshot | null {
+  const runs = p.runs ?? [];
+  if (compareWith) return runs.find((r) => r.date === compareWith) ?? null;
+  return runs.find((r) => r.date < today) ?? null;
+}
+
+/** the forecast report's sprints: the current calendar sprint through the
+ *  deadline sprint. Capacity = Σ each engineer's available days (after their
+ *  own leave) — from today in the current sprint; days = an engineer's
+ *  working days in it (the most common across the team). */
+function reportSprints(p: Project, cal: ReturnType<typeof uniqueSprints>, engineers: string[], day: DayFn, today: string): { sprints: ReportSprint[]; perEngineer: EngineerCapacity[] } {
+  const first = cal.findIndex((c) => c.endDate >= today);
+  if (first < 0) return { sprints: [], perEngineer: [] };
+  let last = cal.findIndex((c) => c.endDate >= p.deadline);
+  if (last < 0) last = cal.length - 1;
+  const span = cal.slice(first, Math.max(first, last) + 1);
+  const fromOf = (c: (typeof cal)[number], i: number) => (i === 0 && today > c.startDate ? today : c.startDate);
+  const perEngineer: EngineerCapacity[] = engineers.map((id) => ({
+    id,
+    sprints: span.map((c, i) => {
+      const w = windowDays(id, fromOf(c, i), c.endDate, day);
+      return { working: w.working, leave: w.unavailable, available: w.available, actual: schedulable(w.available, fromOf(c, i), c.endDate, c.startDate, c.endDate),
+        leaveDates: leaveDates(id, fromOf(c, i), c.endDate, day) };
+    }),
+  }));
+  const sprints = span.map((c, i) => {
+    const per = perEngineer.map((e) => e.sprints[i]);
+    const counts = new Map<number, number>();
+    for (const w of per) counts.set(w.working, (counts.get(w.working) ?? 0) + 1);
+    const days = [...counts].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0]?.[0] ?? 0;
+    return { name: c.name, label: sprintLabel(c.name), days, capacity: Math.round(per.reduce((s, w) => s + w.available, 0) * 100) / 100 };
+  });
+  return { sprints, perEngineer };
+}
+
+/** the report for one project — compareWith picks the earlier run (default: the last earlier day) */
+export function forecastReport(p: Project, links: Record<string, string>, compareWith?: string | null) {
+  const h = projectHealth(p, links, compareWith);
+  return h.report;
+}
+
+/** the project's epics and tickets, minus the epics it leaves out */
+function scoped(p: Project) {
+  const out = new Set(p.excludedEpics ?? []);
+  const epics = (p.jira?.epics ?? []).filter((e) => !out.has(e.key));
+  const keep = new Set(epics.map((e) => e.key));
+  // a closed epic closes its tickets still open in Jira (nothing left to deliver)
+  return { epics, tickets: closeWithEpics(epics, (p.jira?.tickets ?? []).filter((t) => keep.has(t.epicKey))) };
+}
+
+/** Epic status rows for the epics the project leaves out, so an unticked epic still shows its figures */
+function excludedReportRows(p: Project) {
+  const out = new Set(p.excludedEpics ?? []);
+  const epics = (p.jira?.epics ?? []).filter((e) => out.has(e.key));
+  if (!epics.length) return [];
+  const keys = new Set(epics.map((e) => e.key));
+  const tickets = closeWithEpics(epics, (p.jira?.tickets ?? []).filter((t) => keys.has(t.epicKey)));
+  return buildReport({ project: p.name || p.key, date: today(), epics, tickets, sprints: [], engineers: 0, cal: [], prev: null }).epics;
+}
+
+/** today's snapshot for the run history (independent of capacity) */
+export function reportSnapshot(p: Project): Snapshot | null {
+  if (!p.jira) return null;
+  const sc = scoped(p);
+  return buildReport({ project: p.name || p.jira.summary || p.key, date: today(), epics: sc.epics, tickets: sc.tickets,
+    sprints: [], engineers: 0, cal: [], prev: null }).snapshot;
+}
+
+export function projectHealth(p: Project, links: Record<string, string>, compareWith?: string | null) {
+  const t = today();
+  const snap = p.jira;
+  const base = {
+    id: p.id, key: p.key, name: p.name || snap?.summary || p.key, ownName: p.name, track: p.track ?? 'auto', tracked: snap?.tracked ?? null, issueType: snap?.issueType ?? null, startDate: p.startDate, deadline: p.deadline,
+    ideaStatus: snap?.status ?? null, fetchedAt: snap?.fetchedAt ?? null, error: p.error, today: t,
+  };
+  const runs = (p.runs ?? []).map((r) => ({ date: r.date, rt: r.rt, tickets: Object.keys(r.t).length }));
+  // every linked epic, for the editor's include/leave-out list
+  const linkedEpics = (snap?.epics ?? []).map((e) => ({ key: e.key, summary: e.summary, status: e.status, done: e.done, estimateDays: e.estimateDays ?? null, quarters: e.quarters ?? [], excluded: (p.excludedEpics ?? []).includes(e.key) }));
+  if (!snap) return { ...base, runs, linkedEpics, health: null, report: null };
+  const sc = scoped(p);
+
+  // Jira assignee → BambooHR person (or a placeholder that still counts)
+  const people = repo.peopleWithEmail();
+  const match = new Map(snap.assignees.map((a) => [a.accountId, { ...a, ...matchPerson(a, people, links) }]));
+  const personOf = (accountId: string | null) => {
+    if (!accountId) return null;
+    return match.get(accountId)?.id ?? 'jira:' + accountId;
+  };
+  // leave + holidays from the earliest of: project start, today, the calendar's
+  // first sprint (the sprint table looks back to Sprint 1)
+  const cal = uniqueSprints();
+  const lo = [p.startDate, t, cal[0]?.startDate ?? t].reduce(minDate);
+  const day = dayFn(lo, addDays(maxDate(p.deadline, t), 730));
+  const allTickets = withCalendarDates(sc.tickets, cal); // undated future Jira sprints get the calendar's dates
+  // tickets closed as Duplicate / Won't Do / … are left out of every figure
+  const tickets = allTickets.filter((x) => !isCancelled(x));
+  // progress reads from Sprint 1 of the calendar (like the Sprints section), or the project start if earlier
+  const { forecastLog: _log, ...h } = evaluateProject(p, sc.epics, tickets, personOf, day, t, { progressFrom: cal[0]?.startDate ?? null });
+  const engineers = h.people.filter((x: PersonResult) => x.active).map((x: PersonResult) => x.id);
+  const prev = prevRun(p, t, compareWith);
+  const rs = reportSprints(p, cal, engineers, day, t);
+  const report = buildReport({
+    project: p.name || snap.summary || p.key, date: t, epics: sc.epics, tickets: allTickets,
+    sprints: rs.sprints, engineers: engineers.length, cal, prev, personOf,
+  });
+  const sp = sprintBreakdown(p, cal, tickets, personOf, { ...h, forecastLog: _log }, day, t);
+  const nameOf = new Map(people.map((x) => [x.id, x.displayName]));
+  const accountOf = new Map([...match.values()].map((m) => [m.id ?? 'jira:' + m.accountId, m]));
+  const fin = (u: number) => (Number.isFinite(u) ? Math.round(u * 1000) / 1000 : null);
+  const baseline = baselineOf(snap, sc.epics, h.totals.current);
+  const closedOut = closedOutByEpic(sc.tickets);
+
+  return {
+    ...base,
+    runs, linkedEpics,
+    report: {
+      ...report, compareWith: prev?.date ?? null,
+      // actual available capacity per sprint: each engineer's available days, capped at what one schedules in a sprint
+      schedulableCap: SPRINT_SCHEDULABLE_DAYS,
+      // the epics left out (unticked): their own rows, for display only — not in any total
+      excludedRows: excludedReportRows(p),
+      actualBySprint: rs.sprints.map((_, i) => Math.round(rs.perEngineer.reduce((a, e) => a + e.sprints[i].actual, 0) * 100) / 100),
+      // the engineers behind "Capacity, N engineers": name, leave known or not, per-sprint days
+      engineerRows: rs.perEngineer.map((e) => {
+        const m = accountOf.get(e.id);
+        return { ...e, name: nameOf.get(e.id) ?? m?.name ?? 'Unknown', leaveKnown: !!m && m.how !== 'none' };
+      }),
+    },
+    health: {
+      ...h,
+      baseline,
+      quarters: quarterTotals(sc.epics, tickets),
+      utilisation: fin(h.utilisation),
+      people: h.people.map((x) => {
+        const m = accountOf.get(x.id);
+        return {
+          ...x, utilisation: fin(x.utilisation),
+          name: nameOf.get(x.id) ?? m?.name ?? 'Unknown',
+          accountId: m?.accountId ?? null,
+          matched: m?.how ?? 'none', // 'none' = no BambooHR person: leave unknown
+        };
+      }),
+      epics: sc.epics.map((e) => ({ ...e, ...h.epics.find((r) => r.key === e.key)!, closedOut: closedOut.get(e.key) ?? null })),
+      tickets: tickets.map((tk) => ({ ...tk, finish: h.ticketFinish[tk.key] ?? null })),
+      sprints: {
+        ...sp,
+        sprints: sp.sprints.map((x) => ({
+          ...x, utilisation: fin(x.utilisation), forecastUtilisation: fin(x.forecastUtilisation),
+          people: x.people.map((q) => ({ ...q, utilisation: fin(q.utilisation) })),
+        })),
+      },
+    },
+  };
+}
+
+/** People board: every person's capacity across all projects' epics, per
+ *  calendar sprint — working, available (after their own leave), days in Jira.
+ *  Days of leave only, never the type. */
+export function peopleAllocation(projects: Project[], links: Record<string, string>) {
+  const t = today();
+  const withJira = projects.filter((p) => p.jira);
+  const cal = uniqueSprints();
+  const people = repo.peopleWithEmail();
+  const assignees = new Map(withJira.flatMap((p) => p.jira!.assignees).map((a) => [a.accountId, a]));
+  const match = new Map([...assignees.values()].map((a) => [a.accountId, { ...a, ...matchPerson(a, people, links) }]));
+  const personOf = (accountId: string | null) => (accountId ? match.get(accountId)?.id ?? 'jira:' + accountId : null);
+  const until = withJira.map((p) => p.deadline).reduce(maxDate, t);
+  const lo = [t, cal[0]?.startDate ?? t, ...withJira.map((p) => p.startDate)].reduce(minDate);
+  const day = dayFn(lo, addDays(until, 730));
+  const sources = withJira.map((p) => {
+    const sc = scoped(p);
+    return {
+      projectId: p.id, projectName: p.name || p.jira!.summary || p.key, epics: sc.epics,
+      tickets: withCalendarDates(sc.tickets, cal).filter((x) => !isCancelled(x)),
+    };
+  });
+  const a = allocation(sources, cal, personOf, day, t, until);
+  const nameOf = new Map(people.map((x) => [x.id, x.displayName]));
+  const accountOf = new Map([...match.values()].map((m) => [m.id ?? 'jira:' + m.accountId, m]));
+  const fin = (u: number | null) => (u === null ? null : Number.isFinite(u) ? Math.round(u * 1000) / 1000 : null);
+  return {
+    today: t,
+    projects: withJira.map((p) => ({ id: p.id, name: p.name || p.jira!.summary || p.key, deadline: p.deadline })),
+    missing: projects.filter((p) => !p.jira).map((p) => p.name || p.key),
+    ...a,
+    people: a.people.map((x) => {
+      const m = accountOf.get(x.id);
+      return {
+        ...x,
+        name: nameOf.get(x.id) ?? m?.name ?? 'Unknown',
+        leaveKnown: !!m && m.how !== 'none',
+        cells: x.cells.map((c) => ({ ...c, load: fin(c.load), loadAhead: fin(c.loadAhead) })),
+      };
+    }).sort((p, q) => p.name.localeCompare(q.name)),
+  };
+}
+
+/** BambooHR people a Jira assignee can be linked to */
+export const linkablePeople = () => repo.peopleWithEmail().map((p) => ({ id: p.id, name: p.displayName }));

@@ -14,14 +14,19 @@ import { ListView } from './views/List.tsx';
 import { ResourcesPanel } from './views/Resources.tsx';
 import { SettingsSheet } from './views/Settings.tsx';
 import { SetupView } from './views/Setup.tsx';
+import { PeopleView } from './views/People.tsx';
+import { OverviewView } from './views/Overview.tsx';
+import { ProjectHealthView } from './views/ProjectHealth.tsx';
 import { TeamHeader } from './components/TeamHeader.tsx';
 import { TeamColorProvider } from './components/TeamColor.tsx';
 import { useTray } from './state/tray.ts';
 import { MonthRangePicker } from './components/MonthRange.tsx';
 import { monthDays, ym } from './months.ts';
 
-const VIEWS: { id: View; label: string }[] = [
-  { id: 'dashboard', label: 'Dashboard' }, { id: 'longleave', label: 'Long leave' }, { id: 'calendar', label: 'Calendar' }, { id: 'list', label: 'List' }, { id: 'capacity', label: 'Capacity' },
+/** the boards, in two groups: leave (BambooHR) and projects (Jira + leave) */
+const VIEW_GROUPS: { title: string; views: { id: View; label: string }[] }[] = [
+  { title: 'Leave', views: [{ id: 'dashboard', label: 'Dashboard' }, { id: 'longleave', label: 'Long leave' }, { id: 'calendar', label: 'Calendar' }, { id: 'list', label: 'List' }, { id: 'capacity', label: 'Capacity' }] },
+  { title: 'Projects', views: [{ id: 'overview', label: 'Overview' }, { id: 'projects', label: 'Projects' }, { id: 'people', label: 'People' }] },
 ];
 
 export default function App() {
@@ -33,6 +38,7 @@ export default function App() {
   const [cal, setCal] = useState<CalendarData | null>(null);
   const [rows, setRows] = useState<LeaveRecord[] | null>(null);
   const [cap, setCap] = useState<CapacityPeriod[] | null>(null);
+  const [offTrack, setOffTrack] = useState(0);
   const [dash, setDash] = useState<Dashboard | null>(null);
   const [sideCollapsed, setSideCollapsed] = useState(() => {
     try { return localStorage.getItem('sideCollapsed') === '1'; } catch { return false; }
@@ -134,7 +140,7 @@ export default function App() {
     const f = ui.filters;
     const ok = () => n === seq.current;
     if (ui.view === 'dashboard') { void api.getDashboard(f).then((d) => ok() && setDash(d)); return; }
-    if (ui.view === 'longleave') return; // the view fetches its own year
+    if (ui.view === 'longleave' || ui.view === 'projects' || ui.view === 'people' || ui.view === 'overview') return; // these views fetch their own data
     void api.getSummary(f).then((s) => ok() && setSummary(s));
     if (ui.view === 'calendar') void api.getCalendar(f).then((d) => ok() && setCal(d));
     if (ui.view === 'list') void api.getLeave(f, ui.sort).then((d) => ok() && setRows(d));
@@ -190,11 +196,17 @@ export default function App() {
       ] },
       { role: 'edit' },
       { title: 'View', items: [
-        { id: 'view:dashboard', label: 'Dashboard', key: '0', enabled: configured },
-        { id: 'view:longleave', label: 'Long Leave', key: '9', enabled: configured },
-        { id: 'view:calendar', label: 'Calendar', key: '1', enabled: configured },
-        { id: 'view:list', label: 'List', key: '2', enabled: configured },
-        { id: 'view:capacity', label: 'Capacity', key: '3', enabled: configured },
+        { id: 'group:leave', label: 'Leave', enabled: false },
+        { id: 'view:dashboard', label: '  Dashboard', key: '0', enabled: configured },
+        { id: 'view:longleave', label: '  Long Leave', key: '9', enabled: configured },
+        { id: 'view:calendar', label: '  Calendar', key: '1', enabled: configured },
+        { id: 'view:list', label: '  List', key: '2', enabled: configured },
+        { id: 'view:capacity', label: '  Capacity', key: '3', enabled: configured },
+        { separator: true },
+        { id: 'group:projects', label: 'Projects', enabled: false },
+        { id: 'view:overview', label: '  Overview', key: '6', enabled: configured },
+        { id: 'view:projects', label: '  Projects', key: '4', enabled: configured },
+        { id: 'view:people', label: '  People', key: '5', enabled: configured },
         { separator: true },
         { id: 'toggle-filters', label: 'Toggle Filters', key: 'b', enabled: configured },
         { id: 'resources', label: 'Resources', key: 'R' },
@@ -268,26 +280,32 @@ export default function App() {
     <div className="app">
       <header className="top">
         <div className="brand-stack">
-          <div className="brand-small">Leave Radar</div>
-          <span className="brand-sep" aria-hidden="true">/</span>
           <TeamHeader teams={status.teams} selected={status.selected} onSelect={selectTeams} onRename={renameTeamTo} onAdd={() => setSheet('addteam')}
             onColor={async (id, c) => { try { await api.setTeamColor(id, c); await refreshStatus(); } catch (e: any) { setToast({ text: String(e?.message ?? e) }); } }} />
           {status.demo && <span className="tag demo">demo data</span>}
         </div>
-        <nav className="seg">
-          {VIEWS.map((v) => (
-            <button type="button" key={v.id} className={'chip' + (ui.view === v.id ? ' on' : '')} onClick={() => setState({ view: v.id })}>{v.label}</button>
+        <nav className="view-groups" aria-label="Boards">
+          {VIEW_GROUPS.map((g) => (
+            <div key={g.title} className="view-group" role="group" aria-label={g.title}>
+              <span className="view-group-label">{g.title}</span>
+              <div className="seg">
+                {g.views.map((v) => (
+                  <button type="button" key={v.id} className={'chip' + (ui.view === v.id ? ' on' : '')} onClick={() => setState({ view: v.id })}>{v.label}{v.id === 'projects' && offTrack > 0 && <span className="band red tab-count" title="Projects off track">{offTrack}</span>}</button>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
         <div className="spacer" />
         <span className={'sync-state small' + (status.lastError ? ' warn-text' : ' muted')} title={status.lastAttemptAt ? `last attempt ${fmtAgo(status.lastAttemptAt)}` : ''}>
           {status.syncing ? 'Syncing…' : `Synced ${fmtAgo(status.lastSyncAt)}`}
         </span>
-        <button type="button" onClick={syncNow} disabled={status.syncing} title="Sync now (⌘R)">⟳ Sync</button>
-        <button type="button" onClick={() => doExport('csv')} title="Export CSV (⌘E) · Excel: ⌘⇧E">Export</button>
-        <button type="button" onClick={() => setSheet('settings')} title="Settings (⌘,)">Settings</button>
+        <button type="button" className="top-act" onClick={syncNow} disabled={status.syncing} aria-label="Sync now"
+          title={`Sync now (⌘R) · ${status.syncing ? 'syncing…' : `synced ${fmtAgo(status.lastSyncAt)}`}`}><span aria-hidden="true">⟳</span><span className="lbl"> Sync</span></button>
+        <button type="button" className="top-act" onClick={() => doExport('csv')} title="Export CSV (⌘E) · Excel: ⌘⇧E" aria-label="Export"><span aria-hidden="true">⤓</span><span className="lbl"> Export</span></button>
+        <button type="button" className="top-act" onClick={() => setSheet('settings')} title="Settings (⌘,)" aria-label="Settings"><span aria-hidden="true">⚙</span><span className="lbl"> Settings</span></button>
         <button type="button" className={'icon-btn' + (sideCollapsed ? '' : ' on')} onClick={toggleSide}
-          title={(sideCollapsed ? 'Show' : 'Hide') + ' filters (⌘B)'} aria-label="Toggle filters">⫶ Filters</button>
+          title={(sideCollapsed ? 'Show' : 'Hide') + ' filters (⌘B)'} aria-label="Toggle filters"><span aria-hidden="true">⫶</span><span className="lbl"> Filters</span></button>
       </header>
 
       {status.lastError && (
@@ -299,7 +317,7 @@ export default function App() {
 
       <div className="body">
         <div className="content">
-          {ui.view !== 'dashboard' && ui.view !== 'longleave' && <SummaryCards s={summary} range={fmtRange(f.from, f.to)}
+          {ui.view !== 'dashboard' && ui.view !== 'longleave' && ui.view !== 'projects' && ui.view !== 'people' && ui.view !== 'overview' && <SummaryCards s={summary} range={fmtRange(f.from, f.to)}
             rangeSlot={(ui.view === 'list' || ui.view === 'capacity') && lookups ? (
               <MonthRangePicker today={lookups.today}
                 years={[0, 1, 2].map((i) => Number(lookups.today.slice(0, 4)) - 1 + i)}
@@ -317,11 +335,14 @@ export default function App() {
               <LongLeaveView filters={f} version={dataVersion} typeOrder={lookups?.types.map((t) => t.name) ?? []} onRefresh={syncNow} syncing={status.syncing} lastSyncAt={status.lastSyncAt} />
             )}
             {ui.view === 'calendar' && <CalendarView data={cal} today={lookups?.today ?? ''} />}
-            {ui.view === 'list' && <ListView rows={rows} />}
+            {ui.view === 'list' && <ListView rows={rows} sprints={lookups?.sprints} today={lookups?.today} />}
             {ui.view === 'capacity' && <CapacityView periods={cap} filters={f} version={dataVersion} />}
+            {ui.view === 'projects' && <ProjectHealthView version={dataVersion} onRed={setOffTrack} />}
+            {ui.view === 'people' && <PeopleView version={dataVersion} />}
+            {ui.view === 'overview' && <OverviewView version={dataVersion} onOpenProject={() => setState({ view: 'projects' })} />}
           </main>
         </div>
-        {lookups && (
+        {lookups && ui.view !== 'projects' && ui.view !== 'people' && ui.view !== 'overview' && (
           <FilterBar lookups={lookups} views={views} onSaveView={saveView} onDeleteView={deleteView}
             dashboard={ui.view === 'dashboard' || ui.view === 'longleave'} collapsed={sideCollapsed} onToggle={toggleSide} />
         )}

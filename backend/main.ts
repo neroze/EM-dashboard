@@ -1,4 +1,4 @@
-// Leave Radar backend — owns BambooHR access, the SQLite cache and the
+// Capacity Radar backend — owns BambooHR access, the SQLite cache and the
 // Keychain. The UI calls these through tiny.api.call(name, args); everything
 // except setup / syncNow / sendDigest reads the local cache only.
 import { BambooError, cleanDomain, createClient } from './bamboo/client.ts';
@@ -10,8 +10,12 @@ import { latestSnapshot, resourceHistory, startSampling, stopSampling } from './
 import { sortRecords, type Sort } from './domain/sort.ts';
 import type { Filters } from './domain/types.ts';
 import * as Q from './queries.ts';
-import { clearAll, getCredentials, getSlackWebhook, setCredentials, setSlackWebhook } from './secrets.ts';
+import { clearAll, getCredentials, getJira, getSlackWebhook, setCredentials, setJira, setSlackWebhook } from './secrets.ts';
 import * as T from './teams.ts';
+import * as P from './projects.ts';
+import { parseSnapshot } from './domain/forecastReport.ts';
+import { createJira, JiraError } from './jira/client.ts';
+import { cleanSite } from './jira/mappers.ts';
 import { clientFor, setTeamSetting, teamSetting, resetSyncState, settle, startLoop, stopLoop, syncNow, syncState } from './sync/scheduler.ts';
 
 const DB_FILE = 'leave-radar.sqlite'; // every team's data, one cache
@@ -255,6 +259,90 @@ export const api: Record<string, TinyApiHandler> = {
   getSummary: async ({ filters }: { filters: Partial<Filters> }) => { await whenReady(); return Q.summary(filters); },
   getLookups: async () => { await whenReady(); return { ...Q.lookups(), today: today() }; },
 
+  // ---- project health (projects live in <data>/projects.json; Jira is read-only) --
+  getProjects: async (_: unknown, app) => {
+    await whenReady();
+    const jira = await getJira(app);
+    if (jira) void refreshStale(app);
+    const links = P.links();
+    return { jiraSite: jira?.site ?? null, projects: P.projects().map((p) => Q.projectHealth(p, links)), people: Q.linkablePeople() };
+  },
+  /** people board: each person's capacity across every project's epics, per sprint */
+  getAllocation: async (_: unknown, app) => {
+    await whenReady();
+    const jira = await getJira(app);
+    return { jiraSite: jira?.site ?? null, ...Q.peopleAllocation(P.projects(), P.links()) };
+  },
+  /** saves, then pulls the idea's epics + tickets */
+  saveProject: async (input: unknown, app) => {
+    await whenReady();
+    const p = await P.saveProject(input);
+    const warning = p.jira ? null : await pullProject(app, p.id);
+    app.push('data-changed');
+    return { id: p.id, warning };
+  },
+  deleteProject: async ({ id }: { id: string }, app) => {
+    await whenReady();
+    const pid = String(id ?? '');
+    const ok = await P.deleteProject(pid);
+    tried.delete(pid);
+    app.push('data-changed');
+    return { ok };
+  },
+  /** id = one project; none = all */
+  refreshProjects: async ({ id }: { id?: string } = {}, app) => {
+    await whenReady();
+    const ids = id ? [String(id)] : P.projects().map((p) => p.id);
+    const errors: string[] = [];
+    for (const x of ids) { const w = await pullProject(app, x); if (w) errors.push(w); }
+    app.push('data-changed');
+    return { refreshed: ids.length - errors.length, errors };
+  },
+  /** the forecast report against a chosen earlier run */
+  getForecastReport: async ({ id, compareWith }: { id: string; compareWith?: string | null }) => {
+    await whenReady();
+    const p = P.projectById(String(id ?? ''));
+    if (!p) throw new Error('No such project.');
+    return Q.forecastReport(p, P.links(), compareWith ? String(compareWith) : null);
+  },
+  /** paste a "Snapshot for next run" from the Confluence forecast page as a baseline */
+  importRun: async ({ id, text }: { id: string; text: string }, app) => {
+    await whenReady();
+    const run = parseSnapshot(String(text ?? ''));
+    await P.saveRun(String(id ?? ''), run);
+    app.push('data-changed');
+    return { date: run.date, tickets: Object.keys(run.t).length };
+  },
+  deleteRun: async ({ id, date }: { id: string; date: string }, app) => {
+    await whenReady();
+    await P.deleteRun(String(id ?? ''), String(date ?? ''));
+    app.push('data-changed');
+    return { ok: true };
+  },
+  /** link a Jira assignee to a BambooHR person so their leave counts */
+  linkPerson: async ({ accountId, employeeId }: { accountId: string; employeeId: string }, app) => {
+    await whenReady();
+    const emp = String(employeeId ?? '');
+    if (emp && !Q.linkablePeople().some((p) => p.id === emp)) throw new Error('That person is not in your team.');
+    await P.setLink(String(accountId ?? ''), emp);
+    app.push('data-changed');
+    return { ok: true };
+  },
+  getJiraStatus: async (_: unknown, app) => { const j = await getJira(app); return { configured: !!j, site: j?.site ?? null, email: j?.email ?? null }; },
+  /** checks the token against /myself before keeping it */
+  setJira: async ({ site, email, token }: { site: string; email: string; token: string }, app) => {
+    const s = cleanSite(site);
+    const em = String(email ?? '').trim();
+    const tk = String(token ?? '').trim();
+    if (!/^[^@\s]+@[^@\s]+$/.test(em)) throw new Error('Enter the email of your Atlassian account.');
+    if (tk.length < 10) throw new Error('That does not look like a Jira API token.');
+    try { await createJira(s, em, tk).myself(); }
+    catch (e) { throw new Error(e instanceof JiraError ? e.message : 'Could not reach Jira.'); }
+    await setJira(app, { site: s, email: em, token: tk });
+    return { configured: true, site: s, email: em };
+  },
+  clearJira: async (_: unknown, app) => { await setJira(app, null); return { configured: false, site: null, email: null }; },
+
   // ---- saved views --------------------------------------------------------------
   listViews: async () => { await whenReady(); return repo.listViews(); },
   saveView: async ({ name, filters }: { name: string; filters: unknown }, app) => {
@@ -425,6 +513,42 @@ export const api: Record<string, TinyApiHandler> = {
   signOut: async (_: unknown, app, meta) => api.removeTeam({}, app, meta),
 };
 
+/** background: re-pull projects whose Jira data is over an hour old (one run at a time) */
+let refreshing = false;
+const tried = new Map<string, number>(); // project id → last attempt (a failure must not retry on every reload)
+async function refreshStale(app: TinyApp) {
+  if (refreshing) return;
+  const cutoff = Date.now() - 60 * 60_000;
+  const stale = P.projects().filter((p) => (tried.get(p.id) ?? 0) < cutoff && (!p.jira || Date.parse(p.jira.fetchedAt) < cutoff));
+  if (!stale.length) return;
+  refreshing = true;
+  try { for (const p of stale) await pullProject(app, p.id); app.push('data-changed'); }
+  finally { refreshing = false; }
+}
+
+/** fetch one project's epics + tickets into the store; returns an error message or null */
+async function pullProject(app: TinyApp, id: string): Promise<string | null> {
+  const p = P.projectById(id);
+  if (!p) return null;
+  const j = await getJira(app);
+  if (!j) return 'Connect Jira in Settings to pull the project’s epics and tickets.';
+  tried.set(id, Date.now());
+  let snap: Awaited<ReturnType<ReturnType<typeof createJira>['project']>>;
+  try {
+    snap = await createJira(j.site, j.email, j.token).project(p.key, p.track ?? 'auto');
+  } catch (x) {
+    const msg = x instanceof JiraError ? x.message : 'Could not reach Jira.';
+    // removed or re-keyed while Jira answered: this error is about a project that is gone
+    return (await P.setSnapshot(id, null, msg, p.key)) ? `${p.key}: ${msg}` : null;
+  }
+  if (!(await P.setSnapshot(id, snap, snap.epics.length ? null : `No epics are linked to ${p.key}.`, p.key))) return null;
+  // today's run for the report's "what changed since the last run"
+  const fresh = P.projectById(id);
+  const run = fresh && Q.reportSnapshot(fresh);
+  if (run) await P.saveRun(id, run);
+  return null;
+}
+
 async function maybeSendDigest(app: TinyApp) {
   const d = repo.getSetting<DigestSetting>('digest', DIGEST_DEFAULT);
   if (!d.enabled || !(await getSlackWebhook(app))) return;
@@ -465,6 +589,7 @@ export function init(app: TinyApp) {
     if (Object.keys(clean).length !== Object.keys(sq.map).length) await saveSquads(clean, manualSquads(sq.squads, clean));
     repo.applySquads(clean);
     repo.applyScope(T.selectedIds());
+    await P.loadProjects();
   })();
   ready.then(async () => {
     if (await isConfigured(app)) startLoop(app); // launch sync; offline = cached data stays

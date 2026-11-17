@@ -24,7 +24,7 @@ export const SYNC_EVERY_MS = 15 * 60_000;
 const DAILY_MS = 24 * 3600_000;
 // status + terminationDate: the custom report also returns people who have
 // left (onlyCurrent is about field history, not employment), so we filter.
-const REPORT_FIELDS = ['id', 'displayName', 'firstName', 'lastName', 'location', 'supervisorEId', 'supervisorId', 'status', 'terminationDate'];
+const REPORT_FIELDS = ['id', 'displayName', 'firstName', 'lastName', 'location', 'supervisorEId', 'supervisorId', 'status', 'terminationDate', 'workEmail'];
 
 let running: Promise<void> | null = null;
 let timer: any = null;
@@ -96,7 +96,7 @@ async function syncTeam(team: T.Team, client: BambooClient, demo: boolean, full:
       if (!myId) throw new Error('BambooHR did not return your employee id');
       let raw: any;
       try {
-        raw = await client.post('reports/custom', { title: 'Leave Radar', fields: REPORT_FIELDS }, { format: 'JSON', onlyCurrent: 'true' });
+        raw = await client.post('reports/custom', { title: 'Capacity Radar', fields: REPORT_FIELDS }, { format: 'JSON', onlyCurrent: 'true' });
       } catch {
         raw = await client.get('employees/directory'); // no manager ids here: scoping may come up empty (verify)
       }

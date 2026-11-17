@@ -19,8 +19,8 @@ export function TeamColorProvider({ teams, children }: { teams: Team[]; children
 /** one team's block in any people list: the team pill + count (+ extra), then its rows */
 export function TeamGroup({ team, count, meta, children, className, style }: { team: string; count?: number; meta?: ReactNode; children: ReactNode; className?: string; style?: React.CSSProperties }) {
   return (
-    <div className={'tgroup' + (className ? ' ' + className : '')} style={style}>
-      <div className="tgroup-h"><TeamTag name={team} />{count !== undefined && <span className="muted small">{count}</span>}{meta}</div>
+    <div className={'tgroup' + (className ? ' ' + className : '')} style={style} data-copy-group>
+      <div className="tgroup-h" data-copy-line><TeamTag name={team} />{count !== undefined && <span className="muted small">{count}</span>}{meta}</div>
       {children}
     </div>
   );

@@ -60,9 +60,9 @@ function EditableName({ team, onRename }: { team: Team; onRename: (id: string, n
     );
   }
   return (
-    <button type="button" className="team-title" onClick={start} title="Click to rename this team"
+    <button type="button" className="team-title" onClick={start} title={`${team.name} — click to rename`}
       style={{ '--tc': team.color } as React.CSSProperties}>
-      <i className="team-title-dot" />{team.name}<span className="team-edit" aria-hidden="true">✎</span>
+      <i className="team-title-dot" /><span className="team-title-text">{team.name}</span><span className="team-edit" aria-hidden="true">✎</span>
     </button>
   );
 }
@@ -94,7 +94,7 @@ function TeamPicker({ teams, selected, onSelect, onAdd, onColor }: {
     <div className="team-picker" ref={ref}>
       <button type="button" className={'team-pick-btn' + (open ? ' open' : '')} aria-expanded={open} aria-haspopup="dialog"
         onClick={() => (open ? close(true) : (setDraft(selected), setOpen(true)))}
-        title="Choose which teams to view" aria-label="Choose teams">
+        title={`Viewing ${teams.filter((t) => selected.includes(t.id)).map((t) => t.name).join(' + ')} · choose teams`} aria-label="Choose teams">
         {selected.length > 1 && <span className="team-count">{selected.length}</span>}
         <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
       </button>

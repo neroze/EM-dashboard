@@ -3,6 +3,8 @@
 // Long = 10+ working days, mini = 5–9. Each kind gets a summary, a month
 // chart (approved vs still-planned) and a month-by-month view with a small
 // track showing where in the month each run falls.
+import { CopyButton } from '../components/CopyButton.tsx';
+import { copyTable } from '../copy.ts';
 import { useEffect, useState } from 'react';
 import { api } from '../api.ts';
 import { openInBamboo } from '../bamboo-link.ts';
@@ -158,8 +160,8 @@ function KindSection({ kind, title, rule, data, keep, typeOrder }: {
 
       <Sortable grid minCol={300} id={'ll.' + kind} className="year-grid" items={[
         { key: 'summary', node: (
-        <div className="widget">
-          <div className="w-head"><span className="w-title">{title}</span><span className="w-range">{data.label}</span></div>
+        <div className="widget" data-copy>
+          <div className="w-head"><span className="w-title">{title}</span><span className="w-range">{data.label}</span><CopyButton /></div>
           <div className="yr-totals">
             <div className="yr-total"><span className="w-count">{runs.length}<small> {runs.length === 1 ? 'leave' : 'leaves'}</small></span><span className="muted small">{people} {people === 1 ? 'person' : 'people'}</span></div>
             <div className="yr-total"><span className="w-count">{n2(days)}<small> days</small></span><span className="muted small">working days away</span></div>
@@ -183,8 +185,8 @@ function KindSection({ kind, title, rule, data, keep, typeOrder }: {
         </div>
         ) },
         { key: 'chart', className: 'span-2', node: (
-        <div className="widget">
-          <div className="w-head"><span className="w-title">{title} by month</span><span className="w-range">{data.label}</span></div>
+        <div className="widget" data-copy>
+          <div className="w-head"><span className="w-title">{title} by month</span><span className="w-range">{data.label}</span><CopyButton /></div>
           <div className="legend-row">
             <span className="muted">Leaves starting or running in each month ·</span>
             <span className="lg"><i style={{ background: 'var(--planned-bg)' }} />Approved</span>
@@ -252,7 +254,11 @@ function MonthColumns({ kind, months: allMonths, curMonth, multiYear, typeOrder 
           {offCount > 0 && <button type="button" className="link small" onClick={() => setTypes(new Set())}>Show all types</button>}
         </div>
       )}
-      <div className="mcols">
+      <div className="mcols" data-copy-table={copyTable([['Month', 'Leaves', 'Approved', 'Planned', 'Partly approved'], ...months.map((m) => {
+        const c = { planned: 0, draft: 0, mixed: 0 };
+        for (const r of m.runs) c[r.status]++;
+        return [m.month, m.runs.length, c.planned, c.draft, c.mixed];
+      })])}>
         {months.map((m) => {
           const c = { planned: 0, draft: 0, mixed: 0 };
           for (const r of m.runs) c[r.status]++;
@@ -303,10 +309,11 @@ function MonthColumns({ kind, months: allMonths, curMonth, multiYear, typeOrder 
 
 function MonthCard({ m, runs, name, when, today, rows }: { m: MonthRuns; runs: LeaveRun[]; name: string; when: 'past' | 'current' | 'future'; today: string; rows?: boolean }) {
   return (
-    <div className={'widget month-card ' + when + (runs.length ? '' : ' empty-m')}>
+    <div className={'widget month-card ' + when + (runs.length ? '' : ' empty-m')} data-copy>
       <div className="w-head">
         <MonthLabel name={name} current={when === 'current'} />
         <span className="pill">{runs.length} {runs.length === 1 ? 'leave' : 'leaves'}</span>
+        {runs.length > 0 && <CopyButton />}
       </div>
       {runs.length ? <TeamGroups runs={runs} month={m} today={today} rows={rows} /> : <div className="w-empty">No one away</div>}
     </div>

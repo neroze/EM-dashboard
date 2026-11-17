@@ -1,9 +1,9 @@
 // One row per request, grouped under a header row per team (the chosen sort
 // applies within each team). The export writes the same rows, with a Squad
 // column instead of the headers (both use backend/domain/sort.ts).
-import { fmtDays, fmtShort, STATUS_LABEL } from '../format.ts';
-import { setState, useUi } from '../state/filters.ts';
-import type { LeaveRecord, SortKey } from '../types.ts';
+import { fmtDays, fmtShort, sprintName, STATUS_LABEL } from '../format.ts';
+import { resolvePreset, setFilters, setState, useUi } from '../state/filters.ts';
+import type { LeaveRecord, SortKey, SprintInfo } from '../types.ts';
 import { openInBamboo } from '../bamboo-link.ts';
 import { approveLeave } from '../approve.ts';
 import { TeamTag } from '../components/TeamColor.tsx';
@@ -18,7 +18,12 @@ const COLS: { key: SortKey; label: string; cls?: string }[] = [
   { key: 'requestAgeDays', label: 'Request age', cls: 'num' },
 ];
 
-export function ListView({ rows }: { rows: LeaveRecord[] | null }) {
+/** the sprints a leave's dates fall in (in date order) */
+const sprintsFor = (r: LeaveRecord, sprints: SprintInfo[]) =>
+  sprints.filter((s) => s.startDate <= r.endDate && s.endDate >= r.startDate)
+    .sort((a, b) => a.startDate.localeCompare(b.startDate));
+
+export function ListView({ rows, sprints = [], today }: { rows: LeaveRecord[] | null; sprints?: SprintInfo[]; today?: string }) {
   const { sort } = useUi();
   const teams = useTeamGroups(rows ?? [], (r) => r.team);
   if (!rows) return <div className="empty">Loading…</div>;
@@ -50,7 +55,19 @@ export function ListView({ rows }: { rows: LeaveRecord[] | null }) {
               <td>{r.person}<div className="muted small">{r.location}</div></td>
               <td><span className={'badge ' + r.status}>{STATUS_LABEL[r.status]}</span></td>
               <td>{r.typeName}</td>
-              <td className="nowrap">{fmtShort(r.startDate)}{r.endDate !== r.startDate ? ` – ${fmtShort(r.endDate)}` : ''}</td>
+              <td>
+                <span className="nowrap">{fmtShort(r.startDate)}{r.endDate !== r.startDate ? ` – ${fmtShort(r.endDate)}` : ''}</span>
+                {sprintsFor(r, sprints).map((s) => {
+                  const now = !!today && s.startDate <= today && s.endDate >= today;
+                  return (
+                    <button type="button" key={s.name} className={'sprint-tag' + (now ? ' now' : '')}
+                      title={`${s.name}: ${fmtShort(s.startDate)} – ${fmtShort(s.endDate)}${now ? ' (current)' : ''} · show only this sprint`}
+                      onClick={() => today && setFilters({ preset: 'sprint:' + s.name, ...resolvePreset('sprint:' + s.name, today, sprints) })}>
+                      {sprintName(s.name)}
+                    </button>
+                  );
+                })}
+              </td>
               <td className="num">{fmtDays(r.days)}</td>
               <td className={'num' + (r.status === 'draft' && (r.requestAgeDays ?? 0) > 7 ? ' warn-text' : '')}>
                 {r.requestAgeDays !== null ? `${r.requestAgeDays} d` : '—'}

@@ -1,7 +1,7 @@
 // Settings sheet: squads (person -> squad), overlap thresholds, deep link,
 // weekly digest, sync log, sign out.
 import { useEffect, useRef, useState } from 'react';
-import { api, type Settings } from '../api.ts';
+import { api, type JiraStatus, type Settings } from '../api.ts';
 import { fmtAgo } from '../format.ts';
 import { ColorPicker, TeamGroup, TeamTag } from '../components/TeamColor.tsx';
 import { groupByTeam, useTeamOrder } from '../teamColors.ts';
@@ -166,6 +166,8 @@ export function SettingsSheet({ onClose, onSignedOut, teams }: { onClose: () => 
           </label>
         </section>
 
+        <JiraSection />
+
         <section>
           <h3>Weekly digest</h3>
           <p className="muted small">Next two weeks of leave, drafts waiting and low-capacity days — posted to Slack via an incoming webhook (kept in the Keychain), or opened as an email draft.</p>
@@ -215,5 +217,36 @@ export function SettingsSheet({ onClose, onSignedOut, teams }: { onClose: () => 
 
       </div>
     </div>
+  );
+}
+
+/** Jira for the Projects board: read-only; the token goes to the Keychain */
+function JiraSection() {
+  const [st, setSt] = useState<JiraStatus | null>(null);
+  const [site, setSite] = useState('');
+  const [email, setEmail] = useState('');
+  const [token, setToken] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  useEffect(() => { void api.getJiraStatus().then((x) => { setSt(x); setSite(x.site ?? ''); setEmail(x.email ?? ''); }); }, []);
+  const connect = async () => {
+    setBusy(true); setMsg('');
+    try { const x = await api.setJira(site, email, token); setSt(x); setToken(''); setMsg('Connected.'); }
+    catch (e: any) { setMsg(String(e?.message ?? e)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <section>
+      <h3>Jira <span className="muted small">— for the Projects board: pulls each idea’s epics and their tickets, estimates, assignees and sprints (read-only)</span></h3>
+      <div className="row wrap">
+        <input placeholder="acme.atlassian.net" value={site} onChange={(e) => setSite(e.target.value)} />
+        <input placeholder="Atlassian account email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="off" />
+        <input className="grow" type="password" placeholder={st?.configured ? 'API token saved — paste to replace' : 'API token (id.atlassian.com → Security)'}
+          value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" />
+        <button type="button" disabled={busy || !site || !email || !token} onClick={connect}>{busy ? 'Checking…' : 'Connect'}</button>
+        {st?.configured && <button type="button" className="link" onClick={async () => { setSt(await api.clearJira()); setMsg('Disconnected.'); }}>Disconnect</button>}
+      </div>
+      <p className="muted small">{st?.configured ? `Connected to ${st.site}.` : 'Not connected.'} Estimates are read in 6-hour days. {msg}</p>
+    </section>
   );
 }

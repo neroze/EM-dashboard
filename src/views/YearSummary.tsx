@@ -3,6 +3,8 @@
 // month chart follow the selection. Approved + draft, in working days.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api } from '../api.ts';
+import { copyTable } from '../copy.ts';
+import { CopyButton } from '../components/CopyButton.tsx';
 import { fmtDays, fmtShort } from '../format.ts';
 import type { KindTotals, MonthSummary, PersonTotals, UiFilters, YearSummary } from '../types.ts';
 import { Select } from '../components/Select.tsx';
@@ -84,8 +86,8 @@ export function YearSection({ filters, version, color }: { filters: UiFilters; v
       {!data ? <div className="widget"><div className="w-empty">Loading…</div></div> : (
         <Sortable grid minCol={290} id="dash.year" className="year-grid" items={[
           { key: 'totals', node: (
-          <div className="widget">
-            <div className="w-head"><span className="w-title">Selected quarters</span><span className="w-range">{selLabel} {year}</span></div>
+          <div className="widget" data-copy>
+            <div className="w-head"><span className="w-title">Selected quarters</span><span className="w-range">{selLabel} {year}</span><CopyButton /></div>
             <div className="yr-totals">
               <Total label="Leave" color={SERIES[0].color} t={leave} />
               <Total label="Work from home" color={SERIES[1].color} t={wfh} />
@@ -103,9 +105,10 @@ export function YearSection({ filters, version, color }: { filters: UiFilters; v
           </div>
           ) },
           { key: 'chart', className: 'span-2', node: (
-          <div className="widget">
+          <div className="widget" data-copy>
             <div className="w-head">
               <span className="w-title">Leave and work from home by month</span>
+              <CopyButton />
               <div className="seg small-seg" role="group" aria-label="Measure">
                 {(['days', 'requests'] as Metric[]).map((m) => (
                   <button type="button" key={m} className={'chip' + (metric === m ? ' on' : '')} onClick={() => setMetric(m)}>{m === 'days' ? 'Days' : 'Requests'}</button>
@@ -126,8 +129,8 @@ export function YearSection({ filters, version, color }: { filters: UiFilters; v
           <PersonWidget title="Work from home by person" range={selLabel} t={wfh} color={SERIES[1].color} empty="Nobody worked from home in the selected quarters." />
           ) },
           { key: 'types', node: (
-          <div className="widget">
-            <div className="w-head"><span className="w-title">Leave by type</span><span className="w-range">{selLabel}</span></div>
+          <div className="widget" data-copy>
+            <div className="w-head"><span className="w-title">Leave by type</span><span className="w-range">{selLabel}</span><CopyButton /></div>
             <TypeMeters byType={leave.byType} color={color} />
             {Object.keys(wfh.byType).length > 0 && (
               <>
@@ -154,10 +157,11 @@ function PersonWidget({ title, range, t, color, empty }: { title: string; range:
   const max = rows[0]?.[1][by] ?? 0;
   const rankOf = new Map(rows.map(([id], i) => [id, i]));
   return (
-    <div className="widget">
+    <div className="widget" data-copy>
       <div className="w-head">
         <span className="w-title">{title}</span>
         <span className="w-range">{range}</span>
+        <CopyButton />
       </div>
       <div className="w-count">{rows.length}<small> {rows.length === 1 ? 'person' : 'people'}</small></div>
       <div className="w-pills">
@@ -251,7 +255,8 @@ function LineChart({ months, metric, sel, year, today }: { months: MonthSummary[
   const todayX = nowYear === year ? P.l + bw * nowMonth + bw * ((Number(today.slice(8, 10)) - 1) / 31) : null;
 
   return (
-    <div className="line-chart" ref={ref} onMouseLeave={() => setHover(null)}>
+    <div className="line-chart" ref={ref} onMouseLeave={() => setHover(null)}
+      data-copy-table={copyTable([['Month', 'Leave days', 'Leave requests', 'WFH days', 'WFH requests'], ...months.map((m) => [m.month, m.leave.days, m.leave.requests, m.wfh.days, m.wfh.requests])])}>
       {width > 0 && (
         <svg width={W} height={H} role="img" aria-label={`Leave and work from home ${metric} per month, ${year}`}>
           {QS.filter((q) => sel.has(q)).map((q) => (

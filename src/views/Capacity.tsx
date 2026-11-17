@@ -2,10 +2,11 @@
 // separately. Net (worst case) assumes every Draft gets approved. Work from
 // home is NOT leave: those people are working, so WFH days stay available
 // (shown in their own column for information only).
+import { CopyButton } from '../components/CopyButton.tsx';
 import { Fragment, useEffect, useState } from 'react';
 import { api, type CapTotals, type QuarterCapacity } from '../api.ts';
 import { openInBamboo } from '../bamboo-link.ts';
-import { fmtDay, fmtRange, fmtShort, pct } from '../format.ts';
+import { fmtDay, fmtRange, fmtShort, pct, sprintName } from '../format.ts';
 import type { CapacityPeriod, UiFilters } from '../types.ts';
 import { TeamTag } from '../components/TeamColor.tsx';
 import { ListModeSwitch, TeamFlow } from '../components/PeopleFlow.tsx';
@@ -34,13 +35,14 @@ function QuarterPanel({ filters, version }: { filters: UiFilters; version: numbe
   const t = data.total;
   const isNow = data.today >= data.from && data.today <= data.to;
   return (
-    <section className="q-cap" aria-label="Quarter capacity">
+    <section className="q-cap" aria-label="Quarter capacity" data-copy>
       <div className="q-cap-head">
         <button type="button" className="q-nav" onClick={() => step(-1)} aria-label="Previous quarter">‹</button>
         <h2>Q{data.q} {data.year}</h2>
         <button type="button" className="q-nav" onClick={() => step(1)} aria-label="Next quarter">›</button>
         <span className="muted small">{fmtRange(data.from, data.to)}</span>
         {isNow && <span className="role-badge current">This quarter</span>}
+        <CopyButton />
       </div>
       <div className="q-cap-body">
         <div className="q-hero">
@@ -111,8 +113,8 @@ export function CapacityView({ periods, filters, version }: { periods: CapacityP
         const sum = (k: 'available' | 'plannedOut' | 'draftOut' | 'wfh' | 'netPlanned' | 'net') => p.teams.reduce((a, t) => a + t[k], 0);
         const work = sum('available'), after = sum('netPlanned'), worst = sum('net');
         return (
-        <section key={p.id} className="cap-period">
-          <h3>{p.name} <span className="muted small">{fmtRange(p.from, p.to)}</span></h3>
+        <section key={p.id} className="cap-period" data-copy>
+          <h3 title={p.name}>{sprintName(p.name)} <span className="muted small">{fmtRange(p.from, p.to)}</span><CopyButton /></h3>
           <div className="cap-sum">
             <div className="cap-tile main">
               <span className="cap-l">Available after leave</span>
