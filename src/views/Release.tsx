@@ -368,7 +368,7 @@ export function ReleaseBoard() {
           </Section>
         ) },
         { key: 'outside', span: 4, node: (
-          <Section title="Outside the epic" collapsible defaultOpen={false}
+          <Section title="Outside the epic" collapsible
             note={d.outside.version
               ? `fix version ${d.outside.version} · ${d.outside.counts.total} issues: ${d.outside.counts.done} done, ${d.outside.counts.inprogress} in progress, ${d.outside.counts.todo} to do${d.outside.incomplete ? ' (first 200)' : ''}`
               : 'needs a dated fix version on the tasks'}>
