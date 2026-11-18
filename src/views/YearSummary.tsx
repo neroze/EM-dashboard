@@ -84,7 +84,7 @@ export function YearSection({ filters, version, color }: { filters: UiFilters; v
       </div>
 
       {!data ? <div className="widget"><div className="w-empty">Loading…</div></div> : (
-        <Sortable grid minCol={290} id="dash.year" className="year-grid" items={[
+        <Sortable grid units maxCols={4} minCol={290} id="dash.year" className="year-grid" items={[
           { key: 'totals', node: (
           <div className="widget" data-copy>
             <div className="w-head"><span className="w-title">Selected quarters</span><span className="w-range">{selLabel} {year}</span><CopyButton /></div>

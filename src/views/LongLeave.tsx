@@ -158,7 +158,7 @@ function KindSection({ kind, title, rule, data, keep, typeOrder }: {
         <span className="dash-sec-tools"><span className="muted small">Month cards</span><ListModeSwitch mode={cardMode} onChange={setCardMode} /></span>
       </div>
 
-      <Sortable grid minCol={300} id={'ll.' + kind} className="year-grid" items={[
+      <Sortable grid units maxCols={4} minCol={300} id={'ll.' + kind} className="year-grid" items={[
         { key: 'summary', node: (
         <div className="widget" data-copy>
           <div className="w-head"><span className="w-title">{title}</span><span className="w-range">{data.label}</span><CopyButton /></div>

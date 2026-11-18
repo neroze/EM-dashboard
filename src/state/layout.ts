@@ -23,6 +23,33 @@ export function saveSizes(id: string, sizes: Record<string, number>) {
   try { localStorage.setItem(STORE + id + ':sizes', JSON.stringify(sizes)); } catch { /* storage unavailable */ }
 }
 
+/** row-unit grids: heights (1–4 rows) the viewer set; absent = fitted to the content */
+export function loadRows(id: string): Record<string, number> {
+  try {
+    const v = JSON.parse(localStorage.getItem(STORE + id + ':rows') || '{}');
+    return v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([, n]) => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= 4)) as Record<string, number> : {};
+  } catch { return {}; }
+}
+export function saveRows(id: string, rows: Record<string, number>) {
+  try { localStorage.setItem(STORE + id + ':rows', JSON.stringify(rows)); } catch { /* storage unavailable */ }
+}
+
+/** widgets the viewer placed in a column, for the column count they did it at
+ *  (at another width the grid falls back to masonry by order) */
+export interface Placement { n: number; at: Record<string, number> }
+export function loadPlacement(id: string): Placement | null {
+  try {
+    const v = JSON.parse(localStorage.getItem(STORE + id + ':cols') || 'null');
+    if (!v || !Number.isInteger(v.n) || v.n < 1 || typeof v.at !== 'object' || !v.at) return null;
+    return { n: v.n, at: Object.fromEntries(Object.entries(v.at).filter(([, c]) => Number.isInteger(c) && (c as number) >= 0)) as Record<string, number> };
+  } catch { return null; }
+}
+export function savePlacement(id: string, p: Placement | null) {
+  try {
+    if (p) localStorage.setItem(STORE + id + ':cols', JSON.stringify(p)); else localStorage.removeItem(STORE + id + ':cols');
+  } catch { /* storage unavailable */ }
+}
+
 export const AUTO_LAYOUT_EVENT = 'leave-radar:auto-layout';
 /** ask every grid to arrange itself for the current window (see Sortable) */
 export function autoLayout() { window.dispatchEvent(new Event(AUTO_LAYOUT_EVENT)); }

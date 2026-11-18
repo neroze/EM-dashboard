@@ -3,6 +3,8 @@
 // response bodies — errors carry status + path only.
 import { EPIC_FIELDS, mapEpic, mapTicket, TICKET_FIELDS, type Assignee } from './mappers.ts';
 import type { ProjectEpic, Ticket } from '../domain/projectHealth.ts';
+import { mapOutside, mapReleaseEpic, mapReleaseTask, OUTSIDE_FIELDS, RELEASE_EPIC_FIELDS, RELEASE_TASK_FIELDS } from './releaseMappers.ts';
+import { RELEASE_EPIC_KEY, RELEASE_EPIC_LIMIT, RELEASE_TASK_LIMIT, type OutsideTicket, type ReleaseEpic, type ReleaseTask } from '../domain/release.ts';
 
 export class JiraError extends Error {
   status: number;
@@ -67,6 +69,19 @@ export function createJira(site: string, email: string, token: string, timeoutMs
     return out;
   }
 
+  /** one page of up to `max` issues, and whether Jira has more */
+  async function page(jql: string, fields: string[], max: number): Promise<{ issues: any[]; more: boolean }> {
+    const issues: any[] = [];
+    let nextPageToken: string | undefined;
+    for (;;) {
+      const r = await request('POST', 'search/jql', { jql, fields, maxResults: Math.min(100, max - issues.length), ...(nextPageToken ? { nextPageToken } : {}) });
+      issues.push(...(r?.issues ?? []));
+      nextPageToken = r?.nextPageToken;
+      const more = !!nextPageToken && !r?.isLast;
+      if (!more || issues.length >= max || !(r?.issues ?? []).length) return { issues: issues.slice(0, max), more: more || issues.length > max };
+    }
+  }
+
   let sprintField: string | null | undefined;
   /** the Sprint custom field's id differs per site */
   async function sprintFieldId(): Promise<string | null> {
@@ -79,6 +94,28 @@ export function createJira(site: string, email: string, token: string, timeoutMs
   return {
     /** the token's account — used to check credentials */
     myself: () => request('GET', 'myself'),
+
+    /** the 30 newest release epics in LP */
+    async releaseEpics(): Promise<ReleaseEpic[]> {
+      const { issues } = await page('project = LP AND issuetype = Epic AND summary ~ "Release" AND summary ~ "Activit*" ORDER BY created DESC', RELEASE_EPIC_FIELDS, RELEASE_EPIC_LIMIT);
+      return issues.map(mapReleaseEpic).filter((e): e is ReleaseEpic => !!e);
+    },
+
+    /** the epic itself and its children (at most 100; `incomplete` when there are more) */
+    async releaseTasks(epicKey: string): Promise<{ epic: ReleaseEpic; tasks: ReleaseTask[]; incomplete: boolean }> {
+      if (!RELEASE_EPIC_KEY.test(epicKey)) throw new JiraError('A release epic key looks like LP-12345.', 400);
+      const epic = mapReleaseEpic(await request('GET', `issue/${epicKey}?fields=${RELEASE_EPIC_FIELDS.join(',')}`));
+      if (!epic) throw new JiraError(`Jira returned nothing for ${epicKey}.`, 404);
+      const { issues, more } = await page(`parent = ${epicKey} ORDER BY key ASC`, RELEASE_TASK_FIELDS, RELEASE_TASK_LIMIT);
+      return { epic, tasks: issues.map(mapReleaseTask).filter((t): t is ReleaseTask => !!t), incomplete: more };
+    },
+
+    /** decision 5: issues in the release's fix version that are not children of the epic */
+    async outsideEpic(versionId: string, epicKey: string, max = 200): Promise<{ tickets: OutsideTicket[]; incomplete: boolean }> {
+      if (!/^\d{1,12}$/.test(versionId) || !RELEASE_EPIC_KEY.test(epicKey)) return { tickets: [], incomplete: false };
+      const { issues, more } = await page(`fixVersion = ${versionId} AND key != ${epicKey} AND (parent is EMPTY OR parent != ${epicKey}) ORDER BY key ASC`, OUTSIDE_FIELDS, max);
+      return { tickets: issues.map(mapOutside).filter((t): t is OutsideTicket => !!t), incomplete: more };
+    },
 
     /** what a project tracks, by `track`:
      *   'idea' — the epics linked to (or under) the key, and their tickets

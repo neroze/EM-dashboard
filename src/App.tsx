@@ -17,20 +17,26 @@ import { SetupView } from './views/Setup.tsx';
 import { PeopleView } from './views/People.tsx';
 import { OverviewView } from './views/Overview.tsx';
 import { ProjectHealthView } from './views/ProjectHealth.tsx';
+import { ReleaseBoard } from './views/Release.tsx';
 import { TeamHeader } from './components/TeamHeader.tsx';
+import { ViewNav, type ViewGroup } from './components/ViewNav.tsx';
 import { TeamColorProvider } from './components/TeamColor.tsx';
 import { useTray } from './state/tray.ts';
+import { nextTheme, setTheme, THEMES, useTheme } from './state/theme.ts';
 import { MonthRangePicker } from './components/MonthRange.tsx';
 import { monthDays, ym } from './months.ts';
 
 /** the boards, in two groups: leave (BambooHR) and projects (Jira + leave) */
-const VIEW_GROUPS: { title: string; views: { id: View; label: string }[] }[] = [
+const VIEW_GROUPS: ViewGroup[] = [
   { title: 'Leave', views: [{ id: 'dashboard', label: 'Dashboard' }, { id: 'longleave', label: 'Long leave' }, { id: 'calendar', label: 'Calendar' }, { id: 'list', label: 'List' }, { id: 'capacity', label: 'Capacity' }] },
   { title: 'Projects', views: [{ id: 'overview', label: 'Overview' }, { id: 'projects', label: 'Projects' }, { id: 'people', label: 'People' }] },
+  { title: 'Releases', views: [{ id: 'release', label: 'Readiness' }] },
 ];
 
 export default function App() {
   const ui = useUi();
+  const theme = useTheme();
+  const themeInfo = THEMES.find((t) => t.id === theme)!;
   const [status, setStatus] = useState<Status | null>(null);
   const [lookups, setLookups] = useState<Lookups | null>(null);
   const [views, setViews] = useState<SavedView[]>([]);
@@ -140,7 +146,7 @@ export default function App() {
     const f = ui.filters;
     const ok = () => n === seq.current;
     if (ui.view === 'dashboard') { void api.getDashboard(f).then((d) => ok() && setDash(d)); return; }
-    if (ui.view === 'longleave' || ui.view === 'projects' || ui.view === 'people' || ui.view === 'overview') return; // these views fetch their own data
+    if (ui.view === 'longleave' || ui.view === 'projects' || ui.view === 'people' || ui.view === 'overview' || ui.view === 'release') return; // these views fetch their own data
     void api.getSummary(f).then((s) => ok() && setSummary(s));
     if (ui.view === 'calendar') void api.getCalendar(f).then((d) => ok() && setCal(d));
     if (ui.view === 'list') void api.getLeave(f, ui.sort).then((d) => ok() && setRows(d));
@@ -208,6 +214,12 @@ export default function App() {
         { id: 'view:projects', label: '  Projects', key: '4', enabled: configured },
         { id: 'view:people', label: '  People', key: '5', enabled: configured },
         { separator: true },
+        { id: 'group:releases', label: 'Releases', enabled: false },
+        { id: 'view:release', label: '  Release Readiness', key: '7', enabled: configured },
+        { separator: true },
+        { id: 'group:appearance', label: 'Appearance', enabled: false },
+        ...THEMES.map((t) => ({ id: 'theme:' + t.id, label: `  ${t.label}${theme === t.id ? '  ✓' : ''}` })),
+        { separator: true },
         { id: 'toggle-filters', label: 'Toggle Filters', key: 'b', enabled: configured },
         { id: 'resources', label: 'Resources', key: 'R' },
       ] },
@@ -223,7 +235,7 @@ export default function App() {
         ...(views.length ? [{ separator: true }, ...views.map((v) => ({ id: 'saved:' + v.name, label: v.name, enabled: configured }))] : []),
       ] },
     ]);
-  }, [views, status?.configured, status?.teams, status?.selected]);
+  }, [views, status?.configured, status?.teams, status?.selected, theme]);
 
   useEffect(() => {
     const off = tiny.menu.on((id: string) => {
@@ -235,6 +247,7 @@ export default function App() {
       else if (id === 'save-view') void saveView();
       else if (id === 'toggle-filters') toggleSide();
       else if (id.startsWith('view:')) setState({ view: id.slice(5) as View });
+      else if (id.startsWith('theme:')) setTheme(id.slice(6) as 'system' | 'light' | 'dark');
       else if (id.startsWith('saved:')) openView(id.slice(6));
       else if (id.startsWith('team:')) void switchTeam(id.slice(5));
     });
@@ -284,25 +297,17 @@ export default function App() {
             onColor={async (id, c) => { try { await api.setTeamColor(id, c); await refreshStatus(); } catch (e: any) { setToast({ text: String(e?.message ?? e) }); } }} />
           {status.demo && <span className="tag demo">demo data</span>}
         </div>
-        <nav className="view-groups" aria-label="Boards">
-          {VIEW_GROUPS.map((g) => (
-            <div key={g.title} className="view-group" role="group" aria-label={g.title}>
-              <span className="view-group-label">{g.title}</span>
-              <div className="seg">
-                {g.views.map((v) => (
-                  <button type="button" key={v.id} className={'chip' + (ui.view === v.id ? ' on' : '')} onClick={() => setState({ view: v.id })}>{v.label}{v.id === 'projects' && offTrack > 0 && <span className="band red tab-count" title="Projects off track">{offTrack}</span>}</button>
-                ))}
-              </div>
-            </div>
-          ))}
-        </nav>
-        <div className="spacer" />
+        <ViewNav groups={VIEW_GROUPS} view={ui.view} onPick={(v) => setState({ view: v })}
+          badge={(id) => id === 'projects' && offTrack > 0 ? <span className="band red tab-count" title="Projects off track">{offTrack}</span> : null} />
         <span className={'sync-state small' + (status.lastError ? ' warn-text' : ' muted')} title={status.lastAttemptAt ? `last attempt ${fmtAgo(status.lastAttemptAt)}` : ''}>
           {status.syncing ? 'Syncing…' : `Synced ${fmtAgo(status.lastSyncAt)}`}
         </span>
         <button type="button" className="top-act" onClick={syncNow} disabled={status.syncing} aria-label="Sync now"
           title={`Sync now (⌘R) · ${status.syncing ? 'syncing…' : `synced ${fmtAgo(status.lastSyncAt)}`}`}><span aria-hidden="true">⟳</span><span className="lbl"> Sync</span></button>
         <button type="button" className="top-act" onClick={() => doExport('csv')} title="Export CSV (⌘E) · Excel: ⌘⇧E" aria-label="Export"><span aria-hidden="true">⤓</span><span className="lbl"> Export</span></button>
+        <button type="button" className="top-act" onClick={() => setTheme(nextTheme(theme))}
+          title={`Appearance: ${themeInfo.label} — click for ${THEMES.find((t) => t.id === nextTheme(theme))!.label}`} aria-label={`Appearance: ${themeInfo.label}`}>
+          <span aria-hidden="true">{themeInfo.icon}</span><span className="lbl"> {themeInfo.label}</span></button>
         <button type="button" className="top-act" onClick={() => setSheet('settings')} title="Settings (⌘,)" aria-label="Settings"><span aria-hidden="true">⚙</span><span className="lbl"> Settings</span></button>
         <button type="button" className={'icon-btn' + (sideCollapsed ? '' : ' on')} onClick={toggleSide}
           title={(sideCollapsed ? 'Show' : 'Hide') + ' filters (⌘B)'} aria-label="Toggle filters"><span aria-hidden="true">⫶</span><span className="lbl"> Filters</span></button>
@@ -317,7 +322,7 @@ export default function App() {
 
       <div className="body">
         <div className="content">
-          {ui.view !== 'dashboard' && ui.view !== 'longleave' && ui.view !== 'projects' && ui.view !== 'people' && ui.view !== 'overview' && <SummaryCards s={summary} range={fmtRange(f.from, f.to)}
+          {ui.view !== 'dashboard' && ui.view !== 'longleave' && ui.view !== 'projects' && ui.view !== 'people' && ui.view !== 'overview' && ui.view !== 'release' && <SummaryCards s={summary} range={fmtRange(f.from, f.to)}
             rangeSlot={(ui.view === 'list' || ui.view === 'capacity') && lookups ? (
               <MonthRangePicker today={lookups.today}
                 years={[0, 1, 2].map((i) => Number(lookups.today.slice(0, 4)) - 1 + i)}
@@ -339,10 +344,11 @@ export default function App() {
             {ui.view === 'capacity' && <CapacityView periods={cap} filters={f} version={dataVersion} />}
             {ui.view === 'projects' && <ProjectHealthView version={dataVersion} onRed={setOffTrack} />}
             {ui.view === 'people' && <PeopleView version={dataVersion} />}
+            {ui.view === 'release' && <ReleaseBoard />}
             {ui.view === 'overview' && <OverviewView version={dataVersion} onOpenProject={() => setState({ view: 'projects' })} />}
           </main>
         </div>
-        {lookups && ui.view !== 'projects' && ui.view !== 'people' && ui.view !== 'overview' && (
+        {lookups && ui.view !== 'projects' && ui.view !== 'people' && ui.view !== 'overview' && ui.view !== 'release' && (
           <FilterBar lookups={lookups} views={views} onSaveView={saveView} onDeleteView={deleteView}
             dashboard={ui.view === 'dashboard' || ui.view === 'longleave'} collapsed={sideCollapsed} onToggle={toggleSide} />
         )}

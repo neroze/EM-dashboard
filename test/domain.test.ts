@@ -896,3 +896,182 @@ test('schedulable: available, capped at 8 d a sprint, scaled for the part left',
   assert.equal(schedulable(3, '2026-11-19', b, a, b), 3);
   assert.equal(schedulable(0, a, b, a, b), 0);
 });
+
+// ---- release readiness (Requirements Baseline v1) ----
+import { artifactOf, buildsOf, catOf, inferPlanningDay, releaseView, RELEASE_EPIC_KEY, type ReleaseTask } from '../backend/domain/release.ts';
+import { mapReleaseTask } from '../backend/jira/releaseMappers.ts';
+
+const rt = (o: Partial<ReleaseTask> & { key: string; summary: string }): ReleaseTask => ({
+  status: 'To Do', cat: 'todo', type: 'Task', assigneeId: null, assigneeName: null, created: '2026-10-01T09:00:00.000+0000',
+  dueDate: null, resolved: null, origSec: null, remSec: null, spentSec: null, fixVersions: [], ...o,
+});
+const relEpic = { key: 'LP-78935', summary: 'Release activities - 8.0.0.0', status: 'In Progress', cat: 'inprogress' as const, created: null, dueDate: null };
+
+test('release: artifact rules apply in order, case-insensitive, whole words where required', () => {
+  assert.equal(artifactOf('Patch Installation on AZURE'), 'Azure');
+  assert.equal(artifactOf('Patch Installation on AMI'), 'AMI'); // rule 2 beats rule 7
+  assert.equal(artifactOf('Deployment of build to SaaS Stage Environment'), 'SaaS');
+  assert.equal(artifactOf('Upload Plugins in Customer Portal'), 'Plugins');
+  assert.equal(artifactOf('[Patch] - Feature Upgrade Test'), 'Patch');
+  assert.equal(artifactOf('Sanity Testing on Snyk Reported Bugs'), 'Other release tasks');
+  assert.equal(artifactOf('Upload VHD'), 'Azure');
+  assert.equal(artifactOf('Camino review'), 'Other release tasks'); // "ami" inside a word is not AMI
+  assert.equal(artifactOf('Isolation tests'), 'Other release tasks'); // nor "iso"
+  assert.equal(artifactOf('Build the ISO'), 'ISO');
+  assert.equal(artifactOf('Export OVA'), 'OVA');
+});
+
+test('release: build tags, single and multiple', () => {
+  assert.deepEqual(buildsOf('[Build-3] Patch test'), [3]);
+  assert.deepEqual(buildsOf('[Build-3, 4, 5] Patch test'), [3, 4, 5]);
+  assert.deepEqual(buildsOf('[build-12]'), [12]);
+  assert.deepEqual(buildsOf('Patch test'), []);
+});
+
+test('release: epic key filter and status categories', () => {
+  assert.ok(RELEASE_EPIC_KEY.test('LP-78935'));
+  assert.ok(!RELEASE_EPIC_KEY.test('LP-12345678'));
+  assert.ok(!RELEASE_EPIC_KEY.test('XP-1'));
+  assert.ok(!RELEASE_EPIC_KEY.test('LP-1 OR 1=1'));
+  assert.equal(catOf('done'), 'done');
+  assert.equal(catOf('indeterminate'), 'inprogress');
+  assert.equal(catOf('new'), 'todo');
+});
+
+test('release: planning day = most tasks created, earliest on a tie', () => {
+  const ts = [rt({ key: 'A', summary: '', created: '2026-10-02T10:00:00Z' }), rt({ key: 'B', summary: '', created: '2026-10-02T11:00:00Z' }),
+    rt({ key: 'C', summary: '', created: '2026-10-05T10:00:00Z' }), rt({ key: 'D', summary: '', created: '2026-10-05T10:00:00Z' })];
+  assert.equal(inferPlanningDay(ts), '2026-10-02');
+});
+
+test('release: metrics over the epic children', () => {
+  const v80 = { id: '100', name: '8.0.0.0', releaseDate: '2026-12-01', released: false };
+  const v711 = { id: '90', name: '7.11.0.2', releaseDate: '2026-09-01', released: true };
+  const tasks = [
+    rt({ key: 'LP-1', summary: '[Build-2] Patch Installation on AMI', cat: 'done', assigneeId: 'a', assigneeName: 'Alex', origSec: 7200, remSec: 3600, spentSec: 7200, fixVersions: [v80], dueDate: '2026-11-01' }),
+    rt({ key: 'LP-2', summary: '[Build-3, 4] [Patch] - Feature Upgrade Test', cat: 'inprogress', assigneeId: 'a', assigneeName: 'Alex', origSec: 36000, remSec: 18000, fixVersions: [v80], dueDate: '2026-11-10' }),
+    rt({ key: 'LP-3', summary: 'Upload Plugins in Customer Portal', cat: 'todo', assigneeId: 'b', assigneeName: 'Sam', origSec: 10800, remSec: 10800, fixVersions: [v711], dueDate: '2026-12-01' }),
+    rt({ key: 'LP-4', summary: 'Sanity Testing', cat: 'todo', created: '2026-10-08T10:00:00Z' , origSec: 3600, remSec: 3600 }),
+  ];
+  const v = releaseView(relEpic, tasks, '2026-11-17');
+  assert.deepEqual(v.counts, { total: 4, done: 1, inprogress: 1, todo: 2 });
+  assert.equal(v.pctDone, 25);
+  assert.equal(v.hours.estimate, 16);
+  assert.equal(v.hours.remaining, 9);      // Done task's leftover 1 h is excluded
+  assert.equal(v.hours.logged, 2);
+  assert.equal(v.days.estimate, 2.7);      // 16 h / 6
+  assert.equal(v.days.duration, 2);        // Alex: 12 h / 6 — the most-loaded person, not the sum
+  assert.equal(v.days.durationBy, 'Alex');
+  assert.equal(v.planning.day, '2026-10-01');
+  assert.equal(v.scopeAdded.tasks, 1);
+  assert.equal(v.scopeAdded.hours, 1);
+  assert.equal(v.builds.triggered, 4);
+  assert.deepEqual(v.builds.rows.map((r) => [r.build, r.tasks, r.done]), [[2, 1, 1], [3, 1, 0], [4, 1, 0]]);
+  assert.deepEqual(v.overdue.map((t) => t.key), ['LP-2']); // LP-1 is Done, LP-4 has no due date
+  assert.equal(v.release.date, '2026-12-01');
+  assert.equal(v.release.daysTo, 14);
+  const art = Object.fromEntries(v.artifacts.map((a) => [a.artifact, a]));
+  assert.equal(art.AMI.state, 'complete');
+  assert.equal(art.Patch.state, 'inprogress');
+  assert.equal(art.Patch.latestBuild, 4);
+  assert.equal(art.Plugins.state, 'notstarted');
+  assert.equal(art.Plugins.latestBuild, null);
+  assert.equal(art.ISO.state, 'none');
+  assert.deepEqual(v.gaps.otherFixVersion, ['LP-3']);
+  assert.deepEqual(v.gaps.noFixVersion, ['LP-4']);
+  assert.deepEqual(v.gaps.noBuildTag, ['LP-3', 'LP-4']);
+  assert.equal(v.assignees.at(-1)!.name, 'Unassigned');
+  assert.equal(v.assignees[0].loggedH, 2); // Alex logged 2 h of a 12 h estimate
+  // a hand-picked planning date wins
+  const m = releaseView(relEpic, tasks, '2026-11-17', { planningDate: '2026-10-08' });
+  assert.equal(m.planning.day, '2026-10-08');
+  assert.equal(m.scopeAdded.tasks, 0);
+});
+
+test('release: task mapper reads Jira JSON', () => {
+  const t = mapReleaseTask({ key: 'LP-9', fields: { summary: 'x', status: { name: 'In Review', statusCategory: { key: 'indeterminate' } }, timeoriginalestimate: 3600, timespent: null,
+    fixVersions: [{ id: '10', name: 'Not Applicable' }, { id: 11, name: '8.0.0.0', releaseDate: '2026-12-01' }], created: '2026-10-01T10:00:00.000+0545', duedate: '2026-11-01' } })!;
+  assert.equal(t.cat, 'inprogress');
+  assert.equal(t.origSec, 3600);
+  assert.equal(t.spentSec, null);
+  assert.deepEqual(t.fixVersions.map((v) => [v.id, v.releaseDate]), [['10', null], ['11', '2026-12-01']]);
+});
+
+// ---- widget grid geometry (src/components/gridLayout.ts) ----
+import { columnsFor, columnsOf, dropPlan, pack, rowsFor, rowUnit, unitsPx, visualOrder } from '../src/components/gridLayout.ts';
+
+{
+  // 5 columns of 100 px (gap 14): widgets 1–4 one column each, 5 is full width
+  const H: Record<string, number> = { w1: 200, w2: 120, w3: 300, w4: 150, w5: 100 };
+  const S: Record<string, number> = { w1: 1, w2: 1, w3: 1, w4: 1, w5: 6 };
+  const base = { span: (k: string) => S[k], height: (k: string) => H[k], cols: 5, colW: 100 };
+  const order = ['w1', 'w2', 'w3', 'w4', 'w5'];
+  const step = 114;
+
+  test('grid: masonry fills the shortest column; a span is capped to the columns', () => {
+    const { pos } = pack({ ...base, order });
+    assert.deepEqual(order.map((k) => pos.get(k)!.col), [0, 1, 2, 3, 0]);
+    assert.equal(pos.get('w5')!.span, 5);
+    assert.equal(pos.get('w5')!.top, 314); // under the tallest (w3: 300 + gap)
+  });
+
+  test('grid: dragging widget 2 onto column 4 moves only it sideways', () => {
+    const at = columnsOf(pack({ ...base, order }).pos);
+    const plan = dropPlan({ ...base, order, key: 'w2', at, left: 3 * step + 5, top: 0 });
+    assert.equal(plan.col, 3);
+    const { pos } = pack({ ...base, order: plan.order, col: (k) => (k === 'w2' ? plan.col : at[k]) });
+    assert.equal(pos.get('w1')!.col, 0); assert.equal(pos.get('w3')!.col, 2); assert.equal(pos.get('w4')!.col, 3);
+    assert.equal(pos.get('w2')!.col, 3);
+    assert.equal(pos.get('w2')!.top, 0);                 // it takes the top of column 4…
+    assert.equal(pos.get('w4')!.top, 120 + 14);          // …and widget 4 slides down under it
+  });
+
+  test('grid: the empty 5th column is a drop target', () => {
+    const at = columnsOf(pack({ ...base, order }).pos);
+    const plan = dropPlan({ ...base, order, key: 'w3', at, left: 4 * step, top: 0 });
+    const { pos } = pack({ ...base, order: plan.order, col: (k) => (k === 'w3' ? plan.col : at[k]) });
+    assert.deepEqual([pos.get('w3')!.col, pos.get('w3')!.top], [4, 0]);
+    assert.deepEqual(['w1', 'w2', 'w4'].map((k) => pos.get(k)!.col), [0, 1, 3]); // nobody else moved sideways
+  });
+
+  test('grid: dropping low in a column stacks the widget below the others there', () => {
+    const at = columnsOf(pack({ ...base, order }).pos);
+    const plan = dropPlan({ ...base, order, key: 'w4', at, left: 0, top: 260 });
+    const { pos } = pack({ ...base, order: plan.order, col: (k) => (k === 'w4' ? plan.col : at[k]) });
+    assert.deepEqual([pos.get('w4')!.col, pos.get('w4')!.top], [0, 214]); // under w1 (200 + gap)
+    assert.equal(pos.get('w1')!.top, 0);
+  });
+
+  test('grid: widening widget 1 keeps the others in their columns', () => {
+    const at = columnsOf(pack({ ...base, order }).pos);
+    const wide = { ...base, span: (k: string) => (k === 'w1' ? 2 : S[k]) };
+    const { pos } = pack({ ...wide, order, col: (k) => at[k] });
+    assert.deepEqual([pos.get('w1')!.col, pos.get('w1')!.span], [0, 2]);
+    assert.equal(pos.get('w2')!.col, 1);
+    assert.equal(pos.get('w2')!.top, 214);              // w2 slides down under the widened w1
+    assert.equal(pos.get('w3')!.top, 0);
+  });
+
+  test('grid: visual order is top-to-bottom, left-to-right', () => {
+    const { pos } = pack({ ...base, order });
+    assert.deepEqual(visualOrder(pos), ['w1', 'w2', 'w3', 'w4', 'w5']);
+  });
+}
+
+test('grid units: rows fill the visible height exactly; widgets snap to 1–4 rows', () => {
+  for (const h of [600, 760, 900, 1200]) {
+    const { rows, rowH } = rowUnit(h);
+    assert.ok(rows >= 2 && rows <= 4);
+    assert.ok(Math.abs(unitsPx(rows, rowH) - h) < 0.01, `rows fill ${h}px`);
+  }
+  assert.equal(rowUnit(900).rows, 4);
+  assert.equal(rowUnit(600).rows, 2);
+  const rowH = 200;
+  assert.equal(rowsFor(150, rowH), 1);
+  assert.equal(rowsFor(200, rowH), 1);
+  assert.equal(rowsFor(201, rowH), 2);
+  assert.equal(rowsFor(414, rowH), 2);   // 2 rows = 200 + 14 + 200
+  assert.equal(rowsFor(5000, rowH), 4);  // capped: the rest opens in "More"
+  assert.equal(columnsFor(1700, 300, 4), 4);
+  assert.equal(columnsFor(500, 300, 4), 1);
+});

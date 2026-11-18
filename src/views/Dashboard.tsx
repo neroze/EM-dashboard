@@ -84,7 +84,7 @@ function Section({ title, kind, s, d, note }: { title: string; kind: 'leave' | '
         <h2>{title} <span className="h2-sep">·</span> <span className="month-cur h2-month">{monthLong.format(new Date(d.month.from + 'T00:00:00Z'))}</span></h2>
         {note && <span className="muted small">{note}</span>}
       </div>
-      <Sortable grid minCol={280} id={'dash.' + kind} className="dash-grid" items={[
+      <Sortable grid units maxCols={4} minCol={280} id={'dash.' + kind} className="dash-grid" items={[
         { key: 'today', node: <PeriodWidget title={`${k} today`} range={fmtDay(d.today)} p={s.today} statuses={['planned', 'draft', 'denied']} /> },
         { key: 'nextWeek', node: <PeriodWidget title={`${k} next week`} range={fmtRange(d.nextWeek.from, d.nextWeek.to)} p={s.nextWeek} statuses={['planned', 'draft']} /> },
         { key: 'month', node: <PeriodWidget title={`${k} this month`} range={month} p={s.month} statuses={['planned', 'draft']} /> },
@@ -330,7 +330,7 @@ function SprintSection({ sprints }: { sprints: SprintLeave[] }) {
       {!sprints.length
         ? <div className="widget"><div className="w-empty">No sprints configured — add them to sprints.json (Sprint Mapping) to see leave per sprint.</div></div>
         : (
-          <Sortable grid minCol={280} id="dash.sprint" className="dash-grid" items={[
+          <Sortable grid units maxCols={4} minCol={280} id="dash.sprint" className="dash-grid" items={[
             { key: 'overview', node: <SprintOverview sprints={sprints} /> },
             // keyed by role, so the order survives the sprint rolling over
             ...sprints.map((sp) => ({ key: sp.role, node: <SprintWidget sp={sp} /> })),

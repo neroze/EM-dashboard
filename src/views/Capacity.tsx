@@ -3,6 +3,8 @@
 // home is NOT leave: those people are working, so WFH days stay available
 // (shown in their own column for information only).
 import { CopyButton } from '../components/CopyButton.tsx';
+import { Sortable } from '../components/Sortable.tsx';
+import { autoLayout, resetLayouts } from '../state/layout.ts';
 import { Fragment, useEffect, useState } from 'react';
 import { api, type CapTotals, type QuarterCapacity } from '../api.ts';
 import { openInBamboo } from '../bamboo-link.ts';
@@ -107,13 +109,18 @@ export function CapacityView({ periods, filters, version }: { periods: CapacityP
   if (!periods) return <div className="empty">Loading…</div>;
   if (!periods.length || periods.every((p) => !p.teams.length)) return <div className="empty">Nobody in scope matches these filters.</div>;
   return (
-    <div className="cap-wrap">
-      <QuarterPanel key={`${filters.from.slice(0, 4)}-${qOf(filters.from)}`} filters={filters} version={version} />
-      {periods.map((p) => {
+    <div className="cap-wrap cap-board">
+      <div className="dash-bar cap-bar">
+        <button type="button" className="auto-layout" onClick={autoLayout} title="Arrange the widgets to fill this window">Auto layout</button>
+        <button type="button" className="link small" onClick={resetLayouts} title="Put every widget back in its default place and size">Reset layout</button>
+      </div>
+      <Sortable grid units maxCols={4} minCol={280} id="capacity" className="cap-sort" items={[
+        { key: 'quarter', span: 4, node: <QuarterPanel key={`${filters.from.slice(0, 4)}-${qOf(filters.from)}`} filters={filters} version={version} /> },
+        ...periods.map((p) => {
         const sum = (k: 'available' | 'plannedOut' | 'draftOut' | 'wfh' | 'netPlanned' | 'net') => p.teams.reduce((a, t) => a + t[k], 0);
         const work = sum('available'), after = sum('netPlanned'), worst = sum('net');
-        return (
-        <section key={p.id} className="cap-period" data-copy>
+        return { key: 'period:' + p.id, span: 4, node: (
+        <section className="cap-period widget" data-copy>
           <h3 title={p.name}>{sprintName(p.name)} <span className="muted small">{fmtRange(p.from, p.to)}</span><CopyButton /></h3>
           <div className="cap-sum">
             <div className="cap-tile main">
@@ -196,8 +203,8 @@ export function CapacityView({ periods, filters, version }: { periods: CapacityP
           </table>
           <OnLeaveList people={p.onLeave} />
         </section>
-        );
-      })}
+        ) };
+      })]} />
       <p className="muted small">Working days = weekdays in the sprint − public holidays for each person’s location. Available after leave = working days − approved leave; “if drafts approved” also takes off draft leave. Work from home is not leave — those days stay available. Half days count 0.5.</p>
     </div>
   );

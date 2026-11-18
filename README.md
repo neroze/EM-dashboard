@@ -36,6 +36,8 @@ backend/sync/orgTree.ts    reports-to tree, my subtree
 backend/db/schema.ts       SQLite schema   backend/db/repo.ts  queries
 backend/domain/            status, capacity/overlap, dates, sort, export (CSV + .xlsx), resources
 backend/queries.ts         read side for every view
+backend/domain/release.ts  release readiness metrics (one LP "Release Activity" epic's children)
+backend/releases.ts        hand-picked planning dates per release epic (<data>/releases.json)
 backend/secrets.ts         Keychain (tinyjs app.secrets)
 resources/config/          sprints.json (Sprint Mapping - Webx), squads.json, holidays.json
 src/                       React UI: views/, components/, state/filters.ts, api.ts

@@ -13,6 +13,8 @@ import * as Q from './queries.ts';
 import { clearAll, getCredentials, getJira, getSlackWebhook, setCredentials, setJira, setSlackWebhook } from './secrets.ts';
 import * as T from './teams.ts';
 import * as P from './projects.ts';
+import * as R from './releases.ts';
+import { outsideCounts, releaseView, RELEASE_EPIC_KEY } from './domain/release.ts';
 import { parseSnapshot } from './domain/forecastReport.ts';
 import { createJira, JiraError } from './jira/client.ts';
 import { cleanSite } from './jira/mappers.ts';
@@ -328,6 +330,33 @@ export const api: Record<string, TinyApiHandler> = {
     app.push('data-changed');
     return { ok: true };
   },
+  // ---- release readiness (live from Jira on every call; nothing cached) ---------
+  getReleaseEpics: async (_: unknown, app) => {
+    const j = await getJira(app);
+    if (!j) return { jiraSite: null, epics: [] };
+    try { return { jiraSite: j.site, epics: await createJira(j.site, j.email, j.token).releaseEpics() }; }
+    catch (e) { throw new Error(e instanceof JiraError ? e.message : 'Could not reach Jira.'); }
+  },
+  getRelease: async ({ epic }: { epic: string }, app) => {
+    await whenReady();
+    const key = String(epic ?? '').trim().toUpperCase();
+    if (!RELEASE_EPIC_KEY.test(key)) throw new Error('A release epic key looks like LP-12345.');
+    const j = await getJira(app);
+    if (!j) throw new Error('Connect Jira in Settings to see release readiness.');
+    const jira = createJira(j.site, j.email, j.token);
+    try {
+      const { epic: e, tasks, incomplete } = await jira.releaseTasks(key);
+      const view = releaseView(e, tasks, today(), { incomplete, planningDate: R.planningDate(key) });
+      const v = view.release.version;
+      const outside = v ? await jira.outsideEpic(v.id, key) : { tickets: [], incomplete: false };
+      return { jiraSite: j.site, fetchedAt: new Date().toISOString(), ...view, outside: { version: v?.name ?? null, ...outside, counts: outsideCounts(outside.tickets) } };
+    } catch (e) { throw new Error(e instanceof JiraError ? e.message : 'Could not reach Jira.'); }
+  },
+  setReleasePlanningDate: async ({ epic, date }: { epic: string; date: string | null }) => {
+    await whenReady();
+    await R.setPlanningDate(String(epic ?? '').trim().toUpperCase(), date ? String(date) : null);
+    return { ok: true };
+  },
   getJiraStatus: async (_: unknown, app) => { const j = await getJira(app); return { configured: !!j, site: j?.site ?? null, email: j?.email ?? null }; },
   /** checks the token against /myself before keeping it */
   setJira: async ({ site, email, token }: { site: string; email: string; token: string }, app) => {
@@ -590,6 +619,7 @@ export function init(app: TinyApp) {
     repo.applySquads(clean);
     repo.applyScope(T.selectedIds());
     await P.loadProjects();
+    await R.loadReleases();
   })();
   ready.then(async () => {
     if (await isConfigured(app)) startLoop(app); // launch sync; offline = cached data stays

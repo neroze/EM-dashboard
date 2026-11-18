@@ -65,6 +65,9 @@ export const api = {
   importRun: (id: string, text: string) => call<{ date: string; tickets: number }>('importRun', { id, text }),
   deleteRun: (id: string, date: string) => call<{ ok: boolean }>('deleteRun', { id, date }),
   linkPerson: (accountId: string, employeeId: string) => call<{ ok: boolean }>('linkPerson', { accountId, employeeId }),
+  getReleaseEpics: () => call<{ jiraSite: string | null; epics: RelEpic[] }>('getReleaseEpics'),
+  getRelease: (epic: string) => call<ReleaseData>('getRelease', { epic }),
+  setReleasePlanningDate: (epic: string, date: string | null) => call<{ ok: boolean }>('setReleasePlanningDate', { epic, date }),
   getJiraStatus: () => call<JiraStatus>('getJiraStatus'),
   setJira: (site: string, email: string, token: string) => call<JiraStatus>('setJira', { site, email, token }),
   clearJira: () => call<JiraStatus>('clearJira'),
@@ -211,6 +214,36 @@ export interface ProjectInput {
   linkedEpics?: LinkedEpic[];
   /** editor only: how the last pull read the key */
   tracked?: 'idea' | 'epic' | null; issueType?: string | null;
+}
+
+// ---- release readiness (mirrors backend/domain/release.ts) ----
+export type RelCat = 'todo' | 'inprogress' | 'done';
+export interface RelCounts { total: number; done: number; inprogress: number; todo: number }
+export interface RelEpic { key: string; summary: string; status: string; cat: RelCat; created: string | null; dueDate: string | null }
+export interface RelFixVersion { id: string; name: string; releaseDate: string | null; released: boolean }
+export interface RelTask {
+  key: string; summary: string; status: string; cat: RelCat; type: string;
+  assigneeId: string | null; assigneeName: string | null;
+  created: string | null; dueDate: string | null; resolved: string | null;
+  origSec: number | null; remSec: number | null; spentSec: number | null;
+  fixVersions: RelFixVersion[]; artifact: string; builds: number[];
+}
+export type RelGap = 'noFixVersion' | 'otherFixVersion' | 'noBuildTag' | 'noDueDate' | 'noEstimate' | 'noAssignee';
+export interface ReleaseData {
+  jiraSite: string; fetchedAt: string; epic: RelEpic; today: string; incomplete: boolean;
+  counts: RelCounts; pctDone: number | null;
+  hours: { estimate: number; remaining: number; logged: number; withoutEstimate: number };
+  days: { estimate: number; remaining: number; duration: number; remainingDuration: number; durationBy: string | null; remainingBy: string | null };
+  planning: { day: string | null; inferred: string | null; manual: string | null };
+  scopeAdded: { tasks: number; hours: number; days: number; rows: { key: string; summary: string; created: string; estimateH: number | null; cat: RelCat }[] };
+  builds: { triggered: number | null; rows: { build: number; tasks: number; done: number; artifacts: string[]; keys: string[] }[]; untagged: string[] };
+  overdue: { key: string; summary: string; dueDate: string; daysLate: number; assigneeName: string | null; cat: RelCat }[];
+  release: { date: string | null; version: RelFixVersion | null; daysTo: number | null };
+  artifacts: { artifact: string; counts: RelCounts; state: 'complete' | 'inprogress' | 'notstarted' | 'none'; latestBuild: number | null; keys: string[] }[];
+  assignees: (RelCounts & { name: string; accountId: string | null; estimateH: number; remainingH: number; estimateD: number; remainingD: number; loggedH: number; loggedD: number })[];
+  gaps: Record<RelGap, string[]>;
+  tasks: RelTask[];
+  outside: { version: string | null; incomplete: boolean; counts: RelCounts; tickets: { key: string; summary: string; status: string; cat: RelCat; type: string; assigneeName: string | null }[] };
 }
 
 export interface JiraStatus { configured: boolean; site: string | null; email: string | null }
