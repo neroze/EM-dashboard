@@ -3,6 +3,7 @@
 import type {
   CalendarData, CapacityPeriod, Dashboard, LongLeaveYear, YearSummary, Filters, LeaveRecord, Lookups, OverlapDay, SavedView, Sort, Status, Summary, UiFilters,
 } from './types.ts';
+import type { CopyTable, Layout, Level, Ratings, RosterPerson, TalentEmployee, WeightTable, Weights } from '../backend/domain/talent.ts';
 
 const call = <T>(method: string, params?: unknown): Promise<T> => tiny.api.call(method, params);
 
@@ -71,7 +72,23 @@ export const api = {
   getJiraStatus: () => call<JiraStatus>('getJiraStatus'),
   setJira: (site: string, email: string, token: string) => call<JiraStatus>('setJira', { site, email, token }),
   clearJira: () => call<JiraStatus>('clearJira'),
+  // talent grid
+  getTalent: () => call<TalentState>('getTalent'),
+  saveTalentEmployee: (e: TalentInput) => call<TalentEmployee>('saveTalentEmployee', e),
+  deleteTalentEmployee: (id: string) => call<{ ok: boolean }>('deleteTalentEmployee', { id }),
+  moveTalentEmployee: (id: string, rev: number, layout: Layout, box: string) =>
+    call<{ employee: TalentEmployee; previous: Ratings; from: string; to: string }>('moveTalentEmployee', { id, rev, layout, box }),
+  undoTalentMove: (id: string, rev: number, previous: Ratings, layout: Layout) => call<TalentEmployee>('undoTalentMove', { id, rev, previous, layout }),
+  setTalentWeights: (level: Level, weights: Weights) => call<{ changed: number }>('setTalentWeights', { level, weights }),
+  setTalentLayout: (layout: Layout) => call<{ layout: Layout }>('setTalentLayout', { layout }),
+  exportTalentCsv: (path: string) => call<{ path: string }>('exportTalentCsv', { path }),
+  exportTalentBackup: (path: string) => call<{ path: string }>('exportTalentBackup', { path }),
+  importTalentBackup: (path: string, mode: 'merge' | 'replace') => call<{ imported: number; skipped: number }>('importTalentBackup', { path, mode }),
 };
+
+// ---- talent grid (types from backend/domain/talent.ts) ----
+export interface TalentState { employees: TalentEmployee[]; weights: WeightTable; layout: Layout; copy: CopyTable; roster: RosterPerson[] }
+export interface TalentInput { id?: string; bambooId?: string; rev?: number; name: string; role: string; level: Level; ratings: Partial<Ratings>; notes: string }
 
 export interface CapTotals { working: number; plannedOut: number; draftOut: number; wfh: number; available: number; ifDrafts: number; headcount: number }
 export interface QuarterCapacity {
@@ -217,8 +234,8 @@ export interface ProjectInput {
 }
 
 // ---- release readiness (mirrors backend/domain/release.ts) ----
-export type RelCat = 'todo' | 'inprogress' | 'done';
-export interface RelCounts { total: number; done: number; inprogress: number; todo: number }
+export type RelCat = 'todo' | 'scheduled' | 'inprogress' | 'done';
+export interface RelCounts { total: number; done: number; inprogress: number; scheduled: number; todo: number }
 export interface RelEpic { key: string; summary: string; status: string; cat: RelCat; created: string | null; dueDate: string | null }
 export interface RelFixVersion { id: string; name: string; releaseDate: string | null; released: boolean }
 export interface RelTask {

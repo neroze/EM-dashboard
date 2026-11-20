@@ -19,14 +19,14 @@ export function mapFixVersion(v: any): FixVersion | null {
 export function mapReleaseEpic(raw: any): ReleaseEpic | null {
   const f = raw?.fields;
   if (typeof raw?.key !== 'string' || !f) return null;
-  return { key: raw.key, summary: str(f.summary), status: str(f.status?.name, 60), cat: catOf(f.status?.statusCategory?.key), created: iso(f.created), dueDate: date(f.duedate) };
+  return { key: raw.key, summary: str(f.summary), status: str(f.status?.name, 60), cat: catOf(f.status?.statusCategory?.key, f.status?.name), created: iso(f.created), dueDate: date(f.duedate) };
 }
 
 export function mapReleaseTask(raw: any): ReleaseTask | null {
   const f = raw?.fields;
   if (typeof raw?.key !== 'string' || !f) return null;
   return {
-    key: raw.key, summary: str(f.summary), status: str(f.status?.name, 60), cat: catOf(f.status?.statusCategory?.key),
+    key: raw.key, summary: str(f.summary), status: str(f.status?.name, 60), cat: catOf(f.status?.statusCategory?.key, f.status?.name),
     type: str(f.issuetype?.name, 60),
     assigneeId: f.assignee?.accountId ? String(f.assignee.accountId) : null,
     assigneeName: f.assignee?.displayName ? String(f.assignee.displayName) : null,
@@ -39,5 +39,5 @@ export function mapReleaseTask(raw: any): ReleaseTask | null {
 export function mapOutside(raw: any): OutsideTicket | null {
   const f = raw?.fields;
   if (typeof raw?.key !== 'string' || !f) return null;
-  return { key: raw.key, summary: str(f.summary), status: str(f.status?.name, 60), cat: catOf(f.status?.statusCategory?.key), type: str(f.issuetype?.name, 60), assigneeName: f.assignee?.displayName ? String(f.assignee.displayName) : null };
+  return { key: raw.key, summary: str(f.summary), status: str(f.status?.name, 60), cat: catOf(f.status?.statusCategory?.key, f.status?.name), type: str(f.issuetype?.name, 60), assigneeName: f.assignee?.displayName ? String(f.assignee.displayName) : null };
 }

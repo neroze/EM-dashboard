@@ -58,6 +58,46 @@ export interface Dashboard {
   types: string[];
   /** leave (not WFH) per sprint: previous, current, next and the one after */
   sprints: SprintLeave[];
+  /** leave applied for on days whose WFH is already approved (today → 6 weeks) */
+  wfhConflicts?: WfhConflict[];
+}
+
+/** a leave request that lands on days the person's WFH is already approved for:
+ *  the WFH should be cancelled or the leave questioned. Dates and status only —
+ *  never the leave type. */
+export interface WfhConflict {
+  employeeId: string; person: string; team: string;
+  leaveId: string; leaveStatus: 'planned' | 'draft'; url?: string;
+  wfhId: string; wfhUrl?: string;
+  /** the overlapping days, sorted */
+  days: string[];
+}
+
+export const WFH_CONFLICT_WEEKS = 6;
+
+/** approved WFH days that also carry a pending or approved leave request, from
+ *  `from` to `to`; one entry per leave request, most urgent (earliest) first */
+export function wfhConflicts(recs: DashRecord[], days: DashDay[], from: string, to: string): WfhConflict[] {
+  const byId = new Map(recs.map((r) => [r.id, r]));
+  const wfhOn = new Map<string, string>(); // employee|day → approved WFH request id
+  for (const d of days) {
+    const r = byId.get(d.requestId);
+    if (!r || d.day < from || d.day > to || r.status !== 'planned' || !isWfhType(r.typeName)) continue;
+    wfhOn.set(d.employeeId + '|' + d.day, r.id);
+  }
+  const out = new Map<string, WfhConflict>();
+  for (const d of days) {
+    const r = byId.get(d.requestId);
+    if (!r || d.day < from || d.day > to || isWfhType(r.typeName) || (r.status !== 'planned' && r.status !== 'draft')) continue;
+    const wfhId = wfhOn.get(d.employeeId + '|' + d.day);
+    if (!wfhId) continue;
+    const c = out.get(r.id) ?? { employeeId: r.employeeId, person: r.person, team: r.team, leaveId: r.id, leaveStatus: r.status, url: r.url,
+      wfhId, wfhUrl: byId.get(wfhId)?.url, days: [] };
+    if (!c.days.includes(d.day)) c.days.push(d.day);
+    out.set(r.id, c);
+  }
+  return [...out.values()].map((c) => ({ ...c, days: c.days.sort() }))
+    .sort((a, b) => a.days[0].localeCompare(b.days[0]) || a.person.localeCompare(b.person));
 }
 
 /** previous, current, next (+1) around today; with no current sprint the

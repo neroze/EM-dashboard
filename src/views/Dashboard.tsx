@@ -13,7 +13,7 @@ import { CopyButton } from '../components/CopyButton.tsx';
 import { copyTable } from '../copy.ts';
 import { autoLayout, resetLayouts } from '../state/layout.ts';
 import { YearSection } from './YearSummary.tsx';
-import type { UiFilters, AppStatus, DailyPoint, Dashboard, DashItem, DashPeriod, DashSection, Ranked, SameDay, SprintLeave } from '../types.ts';
+import type { UiFilters, AppStatus, DailyPoint, Dashboard, DashItem, DashPeriod, DashSection, Ranked, SameDay, SprintLeave, WfhConflict } from '../types.ts';
 import { PersonTeam } from '../components/TeamColor.tsx';
 import { ListModeSwitch, PeopleFlow, TeamFlow, type FlowBlock, type FlowPerson } from '../components/PeopleFlow.tsx';
 import { useListMode } from '../state/listMode.ts';
@@ -62,6 +62,7 @@ export function DashboardView({ data, typeOrder, onRefresh, syncing, lastSyncAt,
             <span>{syncing ? 'Refreshing' : 'Refresh'}</span>
           </button>
         </div>
+        {!!data.wfhConflicts?.length && <WfhConflictAlert list={data.wfhConflicts} today={data.today} />}
         <Sortable id="dash.sections" label="section" className="dash-sections" items={[
           { key: 'leave', node: <Section title="Leave" kind="leave" s={data.leave} d={data} /> },
           { key: 'sprint', node: <SprintSection sprints={data.sprints} /> },
@@ -416,5 +417,54 @@ function SprintWidget({ sp }: { sp: SprintLeave }) {
       <TeamFlow counts rows={mode === 'rows'} people={sp.people.map((p) => sprintPerson(p, color))} />
       {!sp.people.length && <div className="w-empty">Nobody on leave this sprint.</div>}
     </Widget>
+  );
+}
+
+/** the clash days as ranges: consecutive weekdays join ("Mon 23 – Wed 25"), comma-separated */
+function dayRuns(days: string[]): string {
+  const nextWeekday = (d: string) => {
+    let t = Date.parse(d + 'T00:00:00Z');
+    do t += 86400000; while (new Date(t).getUTCDay() % 6 === 0); // skip Sat (6) and Sun (0)
+    return new Date(t).toISOString().slice(0, 10);
+  };
+  const runs: [string, string][] = [];
+  for (const d of days) {
+    const last = runs[runs.length - 1];
+    if (last && nextWeekday(last[1]) === d) last[1] = d; else runs.push([d, d]);
+  }
+  return runs.map(([a, b]) => fmtRange(a, b)).join(', ');
+}
+
+/** leave applied for on days whose WFH is already approved: the WFH needs
+ *  cancelling (or the leave questioning) in BambooHR. Dates only, never the type. */
+function WfhConflictAlert({ list, today }: { list: WfhConflict[]; today: string }) {
+  const [open, setOpen] = useState(list.length <= 3);
+  const people = new Set(list.map((c) => c.employeeId)).size;
+  const pending = list.filter((c) => c.leaveStatus === 'draft').length;
+  return (
+    <div className="wfh-clash" role="alert" data-copy>
+      <div className="wfh-clash-head">
+        <span className="wfh-clash-icon" aria-hidden="true">⚠</span>
+        <span><b>{people === 1 ? '1 person has' : `${people} people have`} leave on days their WFH is already approved</b>
+          <span className="muted small"> · next 6 weeks{pending ? ` · ${pending} awaiting approval` : ''} — cancel the WFH or check the leave in BambooHR</span></span>
+        <CopyButton />
+        {list.length > 3 && <button type="button" className="link small" data-nocopy onClick={() => setOpen(!open)}>{open ? 'Hide' : `Show ${list.length}`}</button>}
+      </div>
+      {open && (
+        <ul className="wfh-clash-list">
+          {list.map((c) => (
+            <li key={c.leaveId} data-copy-line>
+              <PersonTeam person={c.person} team={c.team} inline />
+              <span className="wfh-clash-days">{dayRuns(c.days)}{c.days[0] === today && <span className="tag">today</span>}</span>
+              <span className={'band ' + (c.leaveStatus === 'draft' ? 'amber' : 'red')}>{c.leaveStatus === 'draft' ? 'leave pending' : 'leave approved'} · WFH approved</span>
+              <span className="wfh-clash-acts" data-nocopy>
+                {c.url && <button type="button" className="link small" onClick={() => void openInBamboo(c.url!)}>Leave ↗</button>}
+                {c.wfhUrl && <button type="button" className="link small" onClick={() => void openInBamboo(c.wfhUrl!)}>WFH ↗</button>}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

@@ -12,7 +12,10 @@ export const RELEASE_TASK_LIMIT = 100;
 export const RELEASE_EPIC_LIMIT = 30;
 export const HOURS_PER_DAY = 6;
 
-export type Cat = 'todo' | 'inprogress' | 'done';
+/** 'scheduled' is its own state: a Jira status named Scheduled, whatever its category
+ *  (it is planned work that has not started, so it stays open but never counts as in progress) */
+export type Cat = 'todo' | 'scheduled' | 'inprogress' | 'done';
+export const SCHEDULED_STATUS = /^\s*scheduled\s*$/i;
 
 export interface FixVersion { id: string; name: string; releaseDate: string | null; released: boolean }
 export interface ReleaseTask {
@@ -53,8 +56,9 @@ export function buildsOf(summary: string): number[] {
   return [...out].sort((a, b) => a - b);
 }
 
-/** Jira status category key → the dashboard's state */
-export function catOf(key: unknown): Cat {
+/** Jira status category key (+ status name) → the dashboard's state */
+export function catOf(key: unknown, status?: unknown): Cat {
+  if (key !== 'done' && typeof status === 'string' && SCHEDULED_STATUS.test(status)) return 'scheduled';
   return key === 'done' ? 'done' : key === 'indeterminate' ? 'inprogress' : 'todo';
 }
 
@@ -72,11 +76,12 @@ export function inferPlanningDay(tasks: ReleaseTask[]): string | null {
   return best;
 }
 
-export interface Counts { total: number; done: number; inprogress: number; todo: number }
+export interface Counts { total: number; done: number; inprogress: number; scheduled: number; todo: number }
 const count = (ts: { cat: Cat }[]): Counts => ({
   total: ts.length,
   done: ts.filter((t) => t.cat === 'done').length,
   inprogress: ts.filter((t) => t.cat === 'inprogress').length,
+  scheduled: ts.filter((t) => t.cat === 'scheduled').length,
   todo: ts.filter((t) => t.cat === 'todo').length,
 });
 
@@ -136,7 +141,7 @@ export function releaseView(epic: ReleaseEpic, raw: ReleaseTask[], today: string
     const ts = tasks.filter((t) => t.artifact === a);
     const c = count(ts);
     const bs = ts.flatMap((t) => t.builds);
-    const state: BuildState = !c.total ? 'none' : c.done === c.total ? 'complete' : c.todo === c.total ? 'notstarted' : 'inprogress';
+    const state: BuildState = !c.total ? 'none' : c.done === c.total ? 'complete' : c.todo + c.scheduled === c.total ? 'notstarted' : 'inprogress';
     return { artifact: a as Artifact, counts: c, state, latestBuild: bs.length ? Math.max(...bs) : null, keys: ts.map((t) => t.key) };
   });
 
@@ -144,7 +149,7 @@ export function releaseView(epic: ReleaseEpic, raw: ReleaseTask[], today: string
   const people = new Map<string, AssigneeRow>();
   for (const t of tasks) {
     const id = t.assigneeId ?? '';
-    const r = people.get(id) ?? { name: t.assigneeName ?? (id ? id : 'Unassigned'), accountId: t.assigneeId, total: 0, done: 0, inprogress: 0, todo: 0, estimateH: 0, remainingH: 0, estimateD: 0, remainingD: 0, loggedH: 0, loggedD: 0 };
+    const r = people.get(id) ?? { name: t.assigneeName ?? (id ? id : 'Unassigned'), accountId: t.assigneeId, total: 0, done: 0, inprogress: 0, scheduled: 0, todo: 0, estimateH: 0, remainingH: 0, estimateD: 0, remainingD: 0, loggedH: 0, loggedD: 0 };
     r.total++; r[t.cat]++;
     r.estimateH += (t.origSec ?? 0) / 3600;
     r.loggedH += (t.spentSec ?? 0) / 3600;

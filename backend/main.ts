@@ -14,6 +14,7 @@ import { clearAll, getCredentials, getJira, getSlackWebhook, setCredentials, set
 import * as T from './teams.ts';
 import * as P from './projects.ts';
 import * as R from './releases.ts';
+import * as TG from './talent.ts';
 import { outsideCounts, releaseView, RELEASE_EPIC_KEY } from './domain/release.ts';
 import { parseSnapshot } from './domain/forecastReport.ts';
 import { createJira, JiraError } from './jira/client.ts';
@@ -145,6 +146,19 @@ function manualSquads(list: string[], map: Record<string, string>): string[] {
   const teamNames = new Set(T.teams().map((t) => t.name.trim().toLowerCase()));
   const used = new Set(Object.values(map));
   return [...new Set([...list, ...used])].filter((q) => q && !teamNames.has(q.trim().toLowerCase()));
+}
+
+/** who made a Talent Grid change: the signed-in key owner's BambooHR name, else "You" */
+function talentActor(): string {
+  const me = teamSetting<string | null>(T.primaryTeam().id, 'myEmployeeId', null);
+  return (me && repo.allEmployees().find((e) => e.id === me)?.displayName) || 'You';
+}
+
+/** the people an EM rates: everyone in the selected teams' BambooHR reporting
+ *  lines, minus the key owners themselves */
+function talentRoster(): { bambooId: string; name: string; team: string }[] {
+  const me = new Set(T.selectedIds().map((t) => teamSetting<string | null>(t, 'myEmployeeId', null)).filter(Boolean));
+  return repo.people().filter((p) => !me.has(p.id)).map((p) => ({ bambooId: p.id, name: p.displayName, team: p.team }));
 }
 
 async function settings(app: TinyApp) {
@@ -356,6 +370,39 @@ export const api: Record<string, TinyApiHandler> = {
     await whenReady();
     await R.setPlanningDate(String(epic ?? '').trim().toUpperCase(), date ? String(date) : null);
     return { ok: true };
+  },
+  // ---- talent grid (the EM's own data, <data>/talent.json) ----------------------
+  getTalent: async () => { await whenReady(); return TG.talentState(talentRoster()); },
+  saveTalentEmployee: async (input: unknown) => { await whenReady(); return TG.saveEmployee(input, talentActor(), talentRoster()); },
+  deleteTalentEmployee: async ({ id }: { id: string }) => { await whenReady(); await TG.deleteEmployee(id); return { ok: true }; },
+  moveTalentEmployee: async ({ id, rev, layout, box }: { id: string; rev: number; layout: number; box: string }) => {
+    await whenReady();
+    return TG.moveEmployee(id, rev, layout, box, talentActor());
+  },
+  undoTalentMove: async ({ id, rev, previous, layout }: { id: string; rev: number; previous: unknown; layout: number }) => {
+    await whenReady();
+    return TG.undoMove(id, rev, previous, layout, talentActor());
+  },
+  setTalentWeights: async ({ level, weights }: { level: string; weights: unknown }) => { await whenReady(); return TG.setWeights(level, weights, talentActor()); },
+  setTalentLayout: async ({ layout }: { layout: number }) => { await whenReady(); return { layout: await TG.setLayout(layout) }; },
+  exportTalentCsv: async ({ path }: { path: string }) => {
+    await whenReady();
+    if (typeof path !== 'string' || !path.startsWith('/')) throw new Error('Choose where to save the file.');
+    await tjs.writeFile(path, new TextEncoder().encode(TG.csv(talentRoster())));
+    return { path };
+  },
+  exportTalentBackup: async ({ path }: { path: string }) => {
+    await whenReady();
+    if (typeof path !== 'string' || !path.startsWith('/')) throw new Error('Choose where to save the file.');
+    await tjs.writeFile(path, new TextEncoder().encode(TG.backup()));
+    return { path };
+  },
+  importTalentBackup: async ({ path, mode }: { path: string; mode: string }) => {
+    await whenReady();
+    if (typeof path !== 'string' || !path.startsWith('/')) throw new Error('Choose a backup file.');
+    let text: string;
+    try { text = new TextDecoder().decode(await tjs.readFile(path)); } catch { throw new Error('Could not read that file.'); }
+    return TG.importBackup(text, mode === 'replace' ? 'replace' : 'merge', talentActor());
   },
   getJiraStatus: async (_: unknown, app) => { const j = await getJira(app); return { configured: !!j, site: j?.site ?? null, email: j?.email ?? null }; },
   /** checks the token against /myself before keeping it */
@@ -620,6 +667,7 @@ export function init(app: TinyApp) {
     repo.applyScope(T.selectedIds());
     await P.loadProjects();
     await R.loadReleases();
+    await TG.loadTalent();
   })();
   ready.then(async () => {
     if (await isConfigured(app)) startLoop(app); // launch sync; offline = cached data stays

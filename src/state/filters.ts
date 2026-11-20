@@ -5,7 +5,7 @@ import { useSyncExternalStore } from 'react';
 import { addDays, addMonths, isDate, parse } from '../../backend/domain/dates.ts';
 import type { SprintInfo, Sort, UiFilters } from '../types.ts';
 
-export type View = 'dashboard' | 'longleave' | 'calendar' | 'list' | 'capacity' | 'projects' | 'people' | 'overview' | 'release';
+export type View = 'dashboard' | 'longleave' | 'calendar' | 'list' | 'capacity' | 'projects' | 'people' | 'overview' | 'release' | 'talent';
 export type Zoom = 'week' | 'sprint' | 'month';
 
 export interface UiState {
@@ -117,7 +117,8 @@ function sanitize(f: Partial<UiFilters>): Partial<UiFilters> {
 // ---- URL hash ---------------------------------------------------------------
 
 function writeHash() {
-  const p = new URLSearchParams();
+  // start from the current hash: boards may keep their own keys there (talent: tg, tl)
+  const p = new URLSearchParams(location.hash.slice(1));
   p.set('v', state.view);
   p.set('z', state.zoom);
   p.set('s', `${state.sort.key}:${state.sort.dir}`);
@@ -132,7 +133,7 @@ export function readHash(today: string, sprints: SprintInfo[]): boolean {
   const p = new URLSearchParams(location.hash.slice(1));
   const v = p.get('v'), z = p.get('z'), s = p.get('s');
   const patch: Partial<UiState> = {};
-  if (v === 'dashboard' || v === 'longleave' || v === 'calendar' || v === 'list' || v === 'capacity' || v === 'projects' || v === 'people' || v === 'overview' || v === 'release') patch.view = v;
+  if (v === 'dashboard' || v === 'longleave' || v === 'calendar' || v === 'list' || v === 'capacity' || v === 'projects' || v === 'people' || v === 'overview' || v === 'release' || v === 'talent') patch.view = v;
   if (z === 'week' || z === 'sprint' || z === 'month') patch.zoom = z;
   if (s) {
     const [key, dir] = s.split(':');

@@ -38,14 +38,20 @@ backend/domain/            status, capacity/overlap, dates, sort, export (CSV + 
 backend/queries.ts         read side for every view
 backend/domain/release.ts  release readiness metrics (one LP "Release Activity" epic's children)
 backend/releases.ts        hand-picked planning dates per release epic (<data>/releases.json)
+backend/domain/talent.ts   Talent Grid rules: 10 criteria, level weights, bands, boxes, zones,
+                           recommendations, moves, CSV, backup (shared with the UI)
+backend/talent.ts          Talent Grid data: reports, ratings, history, weights (<data>/talent.json);
+                           optional <data>/talent-copy.json replaces box titles / actions
 backend/secrets.ts         Keychain (tinyjs app.secrets)
 resources/config/          sprints.json (Sprint Mapping - Webx), squads.json, holidays.json
 src/                       React UI: views/, components/, state/filters.ts, api.ts
 test/                      node:test + anonymised fixtures
 ```
 
-Edited config lives in `~/Library/Application Support/<id>/config/` and wins
-over the bundled copy. Squads are edited in **Settings → Squads**.
+Edited config lives in `<data>/config/` and wins over the bundled copy, where
+`<data>` is the app's data dir from `app.paths()` (macOS:
+`~/Library/Application Support/<id>`, Linux: `$XDG_DATA_HOME/<id>` or
+`~/.local/share/<id>`). Squads are edited in **Settings → Squads**.
 
 ## Things to verify against your tenant
 

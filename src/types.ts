@@ -2,7 +2,7 @@
 // imports — nothing from backend/ is bundled into the page).
 export type { AppStatus, Filters, Holiday, LeaveRecord } from '../backend/domain/types.ts';
 export type { OverlapDay, TeamCapacity } from '../backend/domain/capacity.ts';
-export type { DailyPoint, KindTotals, PersonTotals, MonthSummary, QuarterSummary, YearSummary, Dashboard, DashItem, SprintLeave, SprintPerson, DashPeriod, DashSection, Ranked, SameDay } from '../backend/domain/dashboard.ts';
+export type { DailyPoint, KindTotals, PersonTotals, MonthSummary, QuarterSummary, YearSummary, Dashboard, DashItem, SprintLeave, SprintPerson, DashPeriod, DashSection, Ranked, SameDay, WfhConflict } from '../backend/domain/dashboard.ts';
 export type { LeaveRun, LongLeaveYear, MonthRuns } from '../backend/domain/longleave.ts';
 export type { Sort, SortKey } from '../backend/domain/sort.ts';
 import type { OverlapDay, TeamCapacity } from '../backend/domain/capacity.ts';

@@ -1,6 +1,6 @@
 // The board tabs in the top bar. When every group fits, they show as tabs;
-// when the window is too narrow (or team names take the room), they collapse
-// into one "Group · Board ▾" menu so no board is ever cut off. A hidden copy
+// when the window is too narrow (or team names take the room), each category
+// collapses into its own "Leave ▾" menu so no board is ever cut off. A hidden copy
 // of the tabs is measured against the space the slot actually has.
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Select } from './Select.tsx';
@@ -43,19 +43,35 @@ export function ViewNav({ groups, view, onPick, badge }: {
     </nav>
   );
 
-  const cur = groups.flatMap((g) => g.views.map((v) => ({ g, v }))).find((x) => x.v.id === view);
-  const options = groups.flatMap((g) => g.views.map((v) => ({
-    value: v.id,
-    label: <span className="vn-opt"><span className="vn-grp">{g.title}</span>{v.label}{badge?.(v.id)}</span>,
-  })));
+  // compact: one menu per category ("Leave ▾"), the current board's category highlighted;
+  // a category with a single board is a plain button
+  const menus = (
+    <nav className="view-menus" aria-label="Boards">
+      {groups.map((g) => {
+        const here = g.views.find((v) => v.id === view);
+        if (g.views.length === 1) {
+          const v = g.views[0];
+          return (
+            <button key={g.title} type="button" className={'vm-btn' + (here ? ' on' : '')} aria-current={here ? 'page' : undefined}
+              title={`${g.title}: ${v.label}`} onClick={() => onPick(v.id)}>
+              <span className="vn-grp">{g.title}</span>{here && <b>{v.label}</b>}{badge?.(v.id)}
+            </button>
+          );
+        }
+        return (
+          <Select<View> key={g.title} value={here?.id ?? ('' as View)} className={'vm-btn' + (here ? ' on' : '')} minWidth={170} title={`${g.title} boards`}
+            options={g.views.map((v) => ({ value: v.id, label: <span className="vn-opt">{v.label}{badge?.(v.id)}</span> }))}
+            onChange={onPick}
+            display={<><span className="vn-grp">{g.title}</span>{here && <b>{here.label}</b>}</>} />
+        );
+      })}
+    </nav>
+  );
 
   return (
     <div ref={slot} className="nav-slot">
       {tabs(true)}
-      {compact
-        ? <Select<View> value={view} options={options} onChange={onPick} className="vn-btn" minWidth={220} title="Switch board"
-            display={<><span className="vn-grp">{cur?.g.title}</span><b>{cur?.v.label}</b></>} />
-        : tabs(false)}
+      {compact ? menus : tabs(false)}
     </div>
   );
 }

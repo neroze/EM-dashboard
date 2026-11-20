@@ -1,7 +1,7 @@
 // Read side: everything the views show, built from the SQLite cache only.
 import * as repo from './db/repo.ts';
 import { capacityByTeam, teamLoad, type CapDay, type OverlapDay, type TeamCapacity } from './domain/capacity.ts';
-import { buildDashboard, dashRanges, isWfhType, pickSprints, yearSummary } from './domain/dashboard.ts';
+import { buildDashboard, dashRanges, isWfhType, pickSprints, wfhConflicts, WFH_CONFLICT_WEEKS, yearSummary } from './domain/dashboard.ts';
 import { baselineOf, closedOutByEpic, schedulable, SPRINT_SCHEDULABLE_DAYS, closeWithEpics, evaluateProject, quarterTotals, leaveDates, matchPerson, sprintBreakdown, windowDays, withCalendarDates, type DayFn, type PersonResult } from './domain/projectHealth.ts';
 import { allocation } from './domain/allocation.ts';
 import { buildReport, isCancelled, sprintLabel, type EngineerCapacity, type ReportSprint, type Snapshot } from './domain/forecastReport.ts';
@@ -280,7 +280,15 @@ export function dashboard(fIn: Partial<Filters>) {
       id: x.id, employeeId: x.employeeId, person: x.person, team: x.team, status: appStatus(x.bambooStatus),
       typeName: x.typeName, startDate: x.startDate, endDate: x.endDate, url: linkFor(x.employeeId, x.id),
     }));
-  return buildDashboard(t, recs, repo.days(lo, hi, ['approved', 'requested', 'denied']), sprints);
+  // leave applied for on already-approved WFH days, today → 6 weeks out
+  const cTo = addDays(t, WFH_CONFLICT_WEEKS * 7 - 1);
+  const cRecs = repo.requests({ from: t, to: cTo, statuses: ['planned', 'draft'], teams: f.teams, people: f.people, locations: f.locations })
+    .map((x) => ({ id: x.id, employeeId: x.employeeId, person: x.person, team: x.team, status: appStatus(x.bambooStatus),
+      typeName: x.typeName, startDate: x.startDate, endDate: x.endDate, url: linkFor(x.employeeId, x.id) }));
+  return {
+    ...buildDashboard(t, recs, repo.days(lo, hi, ['approved', 'requested', 'denied']), sprints),
+    wfhConflicts: wfhConflicts(cRecs, repo.days(t, cTo, ['approved', 'requested']), t, cTo),
+  };
 }
 
 /** the dashboard's quarter summary for one calendar year */

@@ -23,7 +23,11 @@ function resetReleaseLayout() {
   window.dispatchEvent(new Event(LAYOUT_RESET_EVENT));
 }
 const n1 = (x: number) => (Number.isInteger(x) ? String(x) : x.toFixed(1));
-const CAT: Record<RelCat, string> = { done: 'Done', inprogress: 'In progress', todo: 'To do' };
+const CAT: Record<RelCat, string> = { done: 'Done', inprogress: 'In progress', scheduled: 'Scheduled', todo: 'To do' };
+/** open states first (how the task list groups), Done last */
+const CAT_ORDER: RelCat[] = ['inprogress', 'scheduled', 'todo', 'done'];
+/** "3 done, 2 in progress, 1 scheduled, 4 to do" — scheduled only when there is any */
+const catLine = (c: RelCounts, sep = ', ') => [`${c.done} done`, `${c.inprogress} in progress`, ...(c.scheduled ? [`${c.scheduled} scheduled`] : []), `${c.todo} to do`].join(sep);
 const STATE = { complete: 'Complete', inprogress: 'In progress', notstarted: 'Not started', none: 'No tasks' } as const;
 const GAPS: { id: RelGap; label: string; conv: number; effect: string }[] = [
   { id: 'noBuildTag', label: 'No [Build-N] tag', conv: 3, effect: 'Builds, tasks by build, artifact latest build' },
@@ -54,13 +58,13 @@ function Keys({ keys, site, max = 12 }: { keys: string[]; site: string | null; m
   );
 }
 
-/** done / in progress / to do, as one stacked bar */
+/** done / in progress / scheduled / to do, as one stacked bar */
 function Stack({ c, wide }: { c: RelCounts; wide?: boolean }) {
   const w = (x: number) => `${c.total ? (x / c.total) * 100 : 0}%`;
   return (
-    <div className={'rel-stack' + (wide ? ' wide' : '')} role="img" aria-label={`${c.done} done, ${c.inprogress} in progress, ${c.todo} to do`}
-      title={`${c.done} done · ${c.inprogress} in progress · ${c.todo} to do`}>
-      <span className="s-done" style={{ width: w(c.done) }} /><span className="s-prog" style={{ width: w(c.inprogress) }} /><span className="s-todo" style={{ width: w(c.todo) }} />
+    <div className={'rel-stack' + (wide ? ' wide' : '')} role="img" aria-label={catLine(c)}
+      title={catLine(c, ' · ')}>
+      <span className="s-done" style={{ width: w(c.done) }} /><span className="s-prog" style={{ width: w(c.inprogress) }} /><span className="s-sched" style={{ width: w(c.scheduled) }} /><span className="s-todo" style={{ width: w(c.todo) }} />
     </div>
   );
 }
@@ -158,7 +162,7 @@ export function ReleaseBoard() {
     : 'no dated fix version';
   const headline: Item[] = [
     { text: `${d.epic.summary} (${d.epic.key})` },
-    { text: `${d.pctDone ?? 0}% done: ${c.done} of ${c.total} tasks done, ${c.inprogress} in progress, ${c.todo} to do` },
+    { text: `${d.pctDone ?? 0}% done: ${c.done} of ${c.total} tasks done, ${c.inprogress} in progress, ${c.scheduled} scheduled, ${c.todo} to do` },
     { text: `Remaining ${n1(d.hours.remaining)} h (${n1(d.days.remaining)} d) · ${d.overdue.length} overdue` },
     { text: `Release date ${relLine}` },
   ];
@@ -204,6 +208,7 @@ export function ReleaseBoard() {
             <div className="rel-scroll"><table className="ov-mini rel-tbl"><tbody>
               <tr><td><span className="rel-sw s-done" /> Done</td><td className="num">{c.done}</td></tr>
               <tr><td><span className="rel-sw s-prog" /> In progress</td><td className="num">{c.inprogress}</td></tr>
+              <tr><td><span className="rel-sw s-sched" /> Scheduled</td><td className="num">{c.scheduled}</td></tr>
               <tr><td><span className="rel-sw s-todo" /> To do</td><td className="num">{c.todo}</td></tr>
               <tr><td><b>Total</b></td><td className="num"><b>{c.total}</b></td></tr>
             </tbody></table></div>
@@ -230,7 +235,7 @@ export function ReleaseBoard() {
                   <div className="rel-art-h"><b>{a.artifact}</b><span className={'rel-state st-' + a.state}>{STATE[a.state]}</span></div>
                   {a.counts.total > 0 ? <>
                     <Stack c={a.counts} />
-                    <div className="small">{a.counts.done}/{a.counts.total} done{a.counts.inprogress ? ` · ${a.counts.inprogress} in progress` : ''}</div>
+                    <div className="small">{a.counts.done}/{a.counts.total} done{a.counts.inprogress ? ` · ${a.counts.inprogress} in progress` : ''}{a.counts.scheduled ? ` · ${a.counts.scheduled} scheduled` : ''}</div>
                     <div className="small muted">{a.latestBuild === null ? 'No build tag' : `Latest build: Build-${a.latestBuild}`}</div>
                   </> : <div className="small muted">none yet</div>}
                 </div>
@@ -277,11 +282,11 @@ export function ReleaseBoard() {
         { key: 'assignees', span: 2, node: (
           <Section title="Progress by assignee">
             <div className="rel-scroll"><table className="ov-mini rel-tbl">
-              <thead><tr><th>Assignee</th><th /><th className="num">Done</th><th className="num">In prog.</th><th className="num">To do</th><th className="num" title="Remaining estimate of open tasks">Left</th></tr></thead>
+              <thead><tr><th>Assignee</th><th /><th className="num">Done</th><th className="num">In prog.</th><th className="num">Sched.</th><th className="num">To do</th><th className="num" title="Remaining estimate of open tasks">Left</th></tr></thead>
               <tbody>
                 {d.assignees.map((a) => (
                   <tr key={a.accountId ?? '-'}><td className={a.accountId ? '' : 'muted'}>{a.name}</td><td className="rel-bar-cell"><Stack c={a} /></td>
-                    <td className="num">{a.done}</td><td className="num">{a.inprogress}</td><td className="num">{a.todo}</td>
+                    <td className="num">{a.done}</td><td className="num">{a.inprogress}</td><td className="num">{a.scheduled}</td><td className="num">{a.todo}</td>
                     <td className="num">{n1(a.remainingH)} h <span className="muted small">{n1(a.remainingD)} d</span></td></tr>
                 ))}
               </tbody>
@@ -370,13 +375,14 @@ export function ReleaseBoard() {
         { key: 'outside', span: 4, node: (
           <Section title="Outside the epic" collapsible
             note={d.outside.version
-              ? `fix version ${d.outside.version} · ${d.outside.counts.total} issues: ${d.outside.counts.done} done, ${d.outside.counts.inprogress} in progress, ${d.outside.counts.todo} to do${d.outside.incomplete ? ' (first 200)' : ''}`
+              ? `fix version ${d.outside.version} · ${d.outside.counts.total} issues: ${catLine(d.outside.counts)}${d.outside.incomplete ? ' (first 200)' : ''}`
               : 'needs a dated fix version on the tasks'}>
             {d.outside.version ? <>
               <div className="row wrap small rel-out-counts">
                 <span><b>{d.outside.counts.total}</b> issues</span>
                 <span><span className="rel-sw s-done" /> {d.outside.counts.done} done</span>
                 <span><span className="rel-sw s-prog" /> {d.outside.counts.inprogress} in progress</span>
+                {d.outside.counts.scheduled > 0 && <span><span className="rel-sw s-sched" /> {d.outside.counts.scheduled} scheduled</span>}
                 <span><span className="rel-sw s-todo" /> {d.outside.counts.todo} to do</span>
                 {d.outside.incomplete && <span className="warn-text">first 200 only</span>}
               </div>
@@ -409,7 +415,7 @@ export function ReleaseBoard() {
           </Section>
         ) },
         { key: 'tasks', span: 4, node: (
-          <Section title="Tasks" note={`${c.inprogress} in progress · ${c.todo} to do · ${c.done} done`}>
+          <Section title="Tasks" note={`${c.inprogress} in progress · ${c.scheduled ? `${c.scheduled} scheduled · ` : ''}${c.todo} to do · ${c.done} done`}>
             <div className="row wrap rel-filters" data-nocopy>
               <MultiSelect label="Artifact" value={tf.artifact} onChange={(artifact) => setTf({ ...tf, artifact })}
                 options={d.artifacts.filter((a) => a.counts.total > 0).map((a) => ({ value: a.artifact, label: a.artifact, hint: String(a.counts.total) }))} />
@@ -420,7 +426,7 @@ export function ReleaseBoard() {
                   // picking statuses opens their groups (Done too); clearing goes back to Done collapsed
                   setClosedGroups(new Set(status.length ? [] : ['done']));
                 }}
-                options={(['inprogress', 'todo', 'done'] as RelCat[]).flatMap((cat) => [...new Set(d.tasks.filter((t) => t.cat === cat).map((t) => t.status))].sort()
+                options={CAT_ORDER.flatMap((cat) => [...new Set(d.tasks.filter((t) => t.cat === cat).map((t) => t.status))].sort()
                   .map((st) => ({ value: st, label: st, group: CAT[cat], hint: String(d.tasks.filter((t) => t.status === st).length) })))} />
               {filtered < c.total && <>
                 <span className="muted small">{filtered} of {c.total} tasks</span>
@@ -429,7 +435,7 @@ export function ReleaseBoard() {
             </div>
             <div className="rel-scroll"><table className="ov-mini rel-tbl rel-tasks">
               <thead><tr><th>Key</th><th>Summary</th><th>Artifact</th><th>Build</th><th>Assignee</th><th>Due</th><th className="num">Est.</th><th className="num">Left</th><th>State</th></tr></thead>
-              {(['inprogress', 'todo', 'done'] as RelCat[]).map((cat) => {
+              {CAT_ORDER.map((cat) => {
                 const rows = shownTasks.filter((t) => t.cat === cat);
                 if (filtering && !rows.length) return null;
                 const open = !closedGroups.has(cat);

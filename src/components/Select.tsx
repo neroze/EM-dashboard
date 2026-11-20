@@ -5,7 +5,11 @@
 // DOM popover anchored to its button, so it lines up in every window mode.
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 
-export interface SelectOption<V extends string | number = string> { value: V; label: ReactNode }
+export interface SelectOption<V extends string | number = string> {
+  value: V; label: ReactNode;
+  /** options sharing a group are listed under that heading, with a divider between groups */
+  group?: string;
+}
 
 export function Select<V extends string | number>({ value, options, onChange, title, className, display, minWidth }: {
   value: V;
@@ -33,7 +37,7 @@ export function Select<V extends string | number>({ value, options, onChange, ti
     const vw = window.innerWidth, vh = window.innerHeight;
     const below = vh - r.bottom - 8, above = r.top - 8;
     const flip = below < 160 && above > below;
-    const maxHeight = Math.min(320, flip ? above : below);
+    const maxHeight = Math.min(options.some((o) => o.group) ? 440 : 320, flip ? above : below);
     const w = Math.max(r.width, minWidth ?? 0);
     const popW = pop.current?.offsetWidth ?? w;
     const left = Math.max(8, Math.min(r.left, vw - popW - 8));
@@ -93,13 +97,19 @@ export function Select<V extends string | number>({ value, options, onChange, ti
       {open && (
         <div ref={pop} className="sel-pop" role="listbox"
           style={pos ? { left: pos.left, top: pos.top, minWidth: pos.minWidth, maxHeight: pos.maxHeight } : { visibility: 'hidden', left: 0, top: 0 }}>
-          {options.map((o, i) => (
-            <div key={String(o.value)} data-i={i} role="option" aria-selected={i === selIdx}
-              className={'sel-item' + (i === selIdx ? ' on' : '') + (i === active ? ' active' : '')}
-              onMouseEnter={() => setActive(i)} onMouseDown={(e) => e.preventDefault()} onClick={() => pick(i)}>
-              <span className="sel-check">{i === selIdx ? '✓' : ''}</span>{o.label}
-            </div>
-          ))}
+          {options.map((o, i) => {
+            const head = o.group && o.group !== options[i - 1]?.group;
+            return (
+              <div key={String(o.value)} role="presentation">
+                {head && <div className={'sel-group' + (i > 0 ? ' sep' : '')} role="presentation">{o.group}</div>}
+                <div data-i={i} role="option" aria-selected={i === selIdx}
+                  className={'sel-item' + (o.group ? ' in-group' : '') + (i === selIdx ? ' on' : '') + (i === active ? ' active' : '')}
+                  onMouseEnter={() => setActive(i)} onMouseDown={(e) => e.preventDefault()} onClick={() => pick(i)}>
+                  <span className="sel-check">{i === selIdx ? '✓' : ''}</span>{o.label}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </>

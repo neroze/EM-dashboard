@@ -936,6 +936,24 @@ test('release: epic key filter and status categories', () => {
   assert.equal(catOf('done'), 'done');
   assert.equal(catOf('indeterminate'), 'inprogress');
   assert.equal(catOf('new'), 'todo');
+  // a status named Scheduled is its own state, whichever category Jira files it under
+  assert.equal(catOf('new', 'Scheduled'), 'scheduled');
+  assert.equal(catOf('indeterminate', ' scheduled '), 'scheduled');
+  assert.equal(catOf('done', 'Scheduled'), 'done');
+  assert.equal(catOf('new', 'Rescheduled'), 'todo');
+});
+
+test('release: scheduled tasks are counted on their own and stay open', () => {
+  const ts = [
+    rt({ key: 'LP-1', summary: 'OVA build', cat: 'scheduled', assigneeId: 'a', assigneeName: 'Alex', origSec: 7200, remSec: 7200 }),
+    rt({ key: 'LP-2', summary: 'OVA upload', cat: 'todo', assigneeId: 'a', assigneeName: 'Alex', origSec: 3600, remSec: 3600 }),
+    rt({ key: 'LP-3', summary: 'AMI build', cat: 'done' }),
+  ];
+  const v = releaseView(relEpic, ts, '2026-11-17');
+  assert.deepEqual(v.counts, { total: 3, done: 1, inprogress: 0, scheduled: 1, todo: 1 });
+  assert.equal(v.hours.remaining, 3);                                   // scheduled work is still left to do
+  assert.equal(v.artifacts.find((a) => a.artifact === 'OVA')!.state, 'notstarted');
+  assert.equal(v.assignees[0].scheduled, 1);
 });
 
 test('release: planning day = most tasks created, earliest on a tie', () => {
@@ -954,7 +972,7 @@ test('release: metrics over the epic children', () => {
     rt({ key: 'LP-4', summary: 'Sanity Testing', cat: 'todo', created: '2026-10-08T10:00:00Z' , origSec: 3600, remSec: 3600 }),
   ];
   const v = releaseView(relEpic, tasks, '2026-11-17');
-  assert.deepEqual(v.counts, { total: 4, done: 1, inprogress: 1, todo: 2 });
+  assert.deepEqual(v.counts, { total: 4, done: 1, inprogress: 1, scheduled: 0, todo: 2 });
   assert.equal(v.pctDone, 25);
   assert.equal(v.hours.estimate, 16);
   assert.equal(v.hours.remaining, 9);      // Done task's leftover 1 h is excluded
@@ -1074,4 +1092,29 @@ test('grid units: rows fill the visible height exactly; widgets snap to 1–4 ro
   assert.equal(rowsFor(5000, rowH), 4);  // capped: the rest opens in "More"
   assert.equal(columnsFor(1700, 300, 4), 4);
   assert.equal(columnsFor(500, 300, 4), 1);
+});
+
+test('wfhConflicts: leave on an approved WFH day is flagged; pending WFH, denied leave and other people are not', async () => {
+  const { wfhConflicts } = await import('../backend/domain/dashboard.ts');
+  const R = (id: string, e: string, status: 'planned' | 'draft' | 'denied', typeName: string) =>
+    ({ id, employeeId: e, person: 'P' + e, team: 'T', status, typeName, startDate: '2026-11-23', endDate: '2026-11-25' });
+  const recs = [
+    R('w1', 'a', 'planned', 'Work From Home'), R('l1', 'a', 'draft', 'Annual Leave'),   // clash, leave pending
+    R('w2', 'b', 'draft', 'Work From Home'), R('l2', 'b', 'draft', 'Annual Leave'),     // WFH not approved: no clash
+    R('w3', 'c', 'planned', 'Work From Home'), R('l3', 'c', 'denied', 'Sick Leave'),    // leave denied: no clash
+    R('l4', 'a', 'planned', 'Sick Leave'),                                              // a: approved leave too
+  ];
+  const D = (requestId: string, employeeId: string, day: string) => ({ requestId, employeeId, day, fraction: 1 });
+  const days = [
+    D('w1', 'a', '2026-11-23'), D('w1', 'a', '2026-11-24'), D('l1', 'a', '2026-11-24'), D('l1', 'a', '2026-11-25'),
+    D('l4', 'a', '2026-11-23'),
+    D('w2', 'b', '2026-11-23'), D('l2', 'b', '2026-11-23'),
+    D('w3', 'c', '2026-11-23'), D('l3', 'c', '2026-11-23'),
+  ];
+  const c = wfhConflicts(recs, days, '2026-11-20', '2026-12-31');
+  assert.deepEqual(c.map((x) => [x.leaveId, x.leaveStatus, x.wfhId, x.days]), [
+    ['l4', 'planned', 'w1', ['2026-11-23']],
+    ['l1', 'draft', 'w1', ['2026-11-24']],
+  ]);
+  assert.equal(wfhConflicts(recs, days, '2026-11-25', '2026-12-31').length, 0); // window excludes the clash days
 });

@@ -18,6 +18,7 @@ import { PeopleView } from './views/People.tsx';
 import { OverviewView } from './views/Overview.tsx';
 import { ProjectHealthView } from './views/ProjectHealth.tsx';
 import { ReleaseBoard } from './views/Release.tsx';
+import { TalentBoard } from './views/Talent.tsx';
 import { TeamHeader } from './components/TeamHeader.tsx';
 import { ViewNav, type ViewGroup } from './components/ViewNav.tsx';
 import { TeamColorProvider } from './components/TeamColor.tsx';
@@ -31,7 +32,12 @@ const VIEW_GROUPS: ViewGroup[] = [
   { title: 'Leave', views: [{ id: 'dashboard', label: 'Dashboard' }, { id: 'longleave', label: 'Long leave' }, { id: 'calendar', label: 'Calendar' }, { id: 'list', label: 'List' }, { id: 'capacity', label: 'Capacity' }] },
   { title: 'Projects', views: [{ id: 'overview', label: 'Overview' }, { id: 'projects', label: 'Projects' }, { id: 'people', label: 'People' }] },
   { title: 'Releases', views: [{ id: 'release', label: 'Readiness' }] },
+  { title: 'Talent', views: [{ id: 'talent', label: 'Talent Grid' }] },
 ];
+
+/** native menu shortcuts (⌘0–⌘9) and the longer names some boards use there */
+const VIEW_KEYS: Partial<Record<View, string>> = { dashboard: '0', calendar: '1', list: '2', capacity: '3', projects: '4', people: '5', overview: '6', release: '7', talent: '8', longleave: '9' };
+const VIEW_MENU_LABEL: Partial<Record<View, string>> = { longleave: 'Long Leave', release: 'Release Readiness' };
 
 export default function App() {
   const ui = useUi();
@@ -146,7 +152,7 @@ export default function App() {
     const f = ui.filters;
     const ok = () => n === seq.current;
     if (ui.view === 'dashboard') { void api.getDashboard(f).then((d) => ok() && setDash(d)); return; }
-    if (ui.view === 'longleave' || ui.view === 'projects' || ui.view === 'people' || ui.view === 'overview' || ui.view === 'release') return; // these views fetch their own data
+    if (ui.view === 'longleave' || ui.view === 'projects' || ui.view === 'people' || ui.view === 'overview' || ui.view === 'release' || ui.view === 'talent') return; // these views fetch their own data
     void api.getSummary(f).then((s) => ok() && setSummary(s));
     if (ui.view === 'calendar') void api.getCalendar(f).then((d) => ok() && setCal(d));
     if (ui.view === 'list') void api.getLeave(f, ui.sort).then((d) => ok() && setRows(d));
@@ -161,7 +167,7 @@ export default function App() {
   }, [refreshStatus]);
 
   // menu bar item: people out today + quick actions
-  useTray(status, dataVersion, { sync: () => void syncNow(), settings: () => setSheet('settings') });
+  useTray(status, dataVersion, { sync: () => void syncNow(), settings: () => setSheet('settings') }, VIEW_GROUPS);
 
   const doExport = useCallback(async (kind: 'csv' | 'xlsx') => {
     const { filters, sort } = getState();
@@ -201,22 +207,12 @@ export default function App() {
         { id: 'export-xlsx', label: 'Export Excel…', key: 'E', enabled: configured },
       ] },
       { role: 'edit' },
+      // one menu per board category, between Edit and View
+      ...VIEW_GROUPS.map((g) => ({
+        title: g.title,
+        items: g.views.map((v) => ({ id: 'view:' + v.id, label: (VIEW_MENU_LABEL[v.id] ?? v.label) + (ui.view === v.id ? '  ✓' : ''), key: VIEW_KEYS[v.id], enabled: configured })),
+      })),
       { title: 'View', items: [
-        { id: 'group:leave', label: 'Leave', enabled: false },
-        { id: 'view:dashboard', label: '  Dashboard', key: '0', enabled: configured },
-        { id: 'view:longleave', label: '  Long Leave', key: '9', enabled: configured },
-        { id: 'view:calendar', label: '  Calendar', key: '1', enabled: configured },
-        { id: 'view:list', label: '  List', key: '2', enabled: configured },
-        { id: 'view:capacity', label: '  Capacity', key: '3', enabled: configured },
-        { separator: true },
-        { id: 'group:projects', label: 'Projects', enabled: false },
-        { id: 'view:overview', label: '  Overview', key: '6', enabled: configured },
-        { id: 'view:projects', label: '  Projects', key: '4', enabled: configured },
-        { id: 'view:people', label: '  People', key: '5', enabled: configured },
-        { separator: true },
-        { id: 'group:releases', label: 'Releases', enabled: false },
-        { id: 'view:release', label: '  Release Readiness', key: '7', enabled: configured },
-        { separator: true },
         { id: 'group:appearance', label: 'Appearance', enabled: false },
         ...THEMES.map((t) => ({ id: 'theme:' + t.id, label: `  ${t.label}${theme === t.id ? '  ✓' : ''}` })),
         { separator: true },
@@ -235,7 +231,7 @@ export default function App() {
         ...(views.length ? [{ separator: true }, ...views.map((v) => ({ id: 'saved:' + v.name, label: v.name, enabled: configured }))] : []),
       ] },
     ]);
-  }, [views, status?.configured, status?.teams, status?.selected, theme]);
+  }, [views, status?.configured, status?.teams, status?.selected, theme, ui.view]);
 
   useEffect(() => {
     const off = tiny.menu.on((id: string) => {
@@ -322,7 +318,7 @@ export default function App() {
 
       <div className="body">
         <div className="content">
-          {ui.view !== 'dashboard' && ui.view !== 'longleave' && ui.view !== 'projects' && ui.view !== 'people' && ui.view !== 'overview' && ui.view !== 'release' && <SummaryCards s={summary} range={fmtRange(f.from, f.to)}
+          {ui.view !== 'dashboard' && ui.view !== 'longleave' && ui.view !== 'projects' && ui.view !== 'people' && ui.view !== 'overview' && ui.view !== 'release' && ui.view !== 'talent' && <SummaryCards s={summary} range={fmtRange(f.from, f.to)}
             rangeSlot={(ui.view === 'list' || ui.view === 'capacity') && lookups ? (
               <MonthRangePicker today={lookups.today}
                 years={[0, 1, 2].map((i) => Number(lookups.today.slice(0, 4)) - 1 + i)}
@@ -345,10 +341,11 @@ export default function App() {
             {ui.view === 'projects' && <ProjectHealthView version={dataVersion} onRed={setOffTrack} />}
             {ui.view === 'people' && <PeopleView version={dataVersion} />}
             {ui.view === 'release' && <ReleaseBoard />}
+            {ui.view === 'talent' && <TalentBoard version={dataVersion} />}
             {ui.view === 'overview' && <OverviewView version={dataVersion} onOpenProject={() => setState({ view: 'projects' })} />}
           </main>
         </div>
-        {lookups && ui.view !== 'projects' && ui.view !== 'people' && ui.view !== 'overview' && ui.view !== 'release' && (
+        {lookups && ui.view !== 'projects' && ui.view !== 'people' && ui.view !== 'overview' && ui.view !== 'release' && ui.view !== 'talent' && (
           <FilterBar lookups={lookups} views={views} onSaveView={saveView} onDeleteView={deleteView}
             dashboard={ui.view === 'dashboard' || ui.view === 'longleave'} collapsed={sideCollapsed} onToggle={toggleSide} />
         )}
